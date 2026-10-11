@@ -1,6 +1,6 @@
 env               = "prod"
 aws_region        = "us-east-1"
-github_repository = "arshiya19/Agentic_VOP"
+github_repository = "the-sisyfix/Agentic_VOP"
 instance_type     = "t4g.small"
 volume_size       = 20
 
