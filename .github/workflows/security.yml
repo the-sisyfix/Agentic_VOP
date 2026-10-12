@@ -258,12 +258,42 @@ jobs:
           # not just the latest snapshot.
           fetch-depth: 0
 
+      # Use the open-source Gitleaks CLI (MIT) directly instead of the
+      # gitleaks-action wrapper. The wrapper requires a paid GITLEAKS_LICENSE
+      # for repos owned by a GitHub organization; the CLI binary does not.
+      # Behavior preserved: scans full git history and BLOCKS (exit 1) on any
+      # detected secret. Honors the repo-root .gitleaks.toml allowlist.
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION="8.30.1"
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Any detected secret is a blocker — no warn/pass split here.
-          # GITLEAKS_ENABLE_COMMENTS: "false"  # uncomment to silence PR comments
+        run: |
+          # 'git' scans the full commit history (via git log -p); fetch-depth: 0
+          # above ensures all commits are present. Any finding returns exit code 1,
+          # which fails this job and the overall security gate.
+          # ('detect' was deprecated in v8.19.0 in favor of the 'git' subcommand.)
+          gitleaks git . \
+            --config .gitleaks.toml \
+            --redact \
+            --verbose \
+            --exit-code 1 \
+            --report-format sarif \
+            --report-path gitleaks-report.sarif
+
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.sarif
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # 4. pip-audit — Python SCA (exact locked deps via uv.lock)
