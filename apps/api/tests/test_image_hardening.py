@@ -247,9 +247,7 @@ def test_strategy_is_instance_agnostic_uses_ctx_instance():
     seam) — it never resolves an instance itself."""
     cfg = _config()
     strat = ImageHardenStrategy(config=cfg, emit_fn=lambda *a, **k: None)
-    with patch(
-        "app.services.image_hardening.strategy.RemoteExecutor"
-    ) as mock_exec:
+    with patch("app.services.image_hardening.strategy.RemoteExecutor") as mock_exec:
         strat._executor(_ctx(build_instance_id="i-ephemeral-123"))
     # First positional arg to RemoteExecutor is the instance id from ctx.
     args, _kwargs = mock_exec.call_args

@@ -37,7 +37,9 @@ from .strategy import ImageHardenStrategy
 log = logging.getLogger("image_hardening")
 
 
-def _log_emitter(run_id: str, agent: str, event_type: str, message: str, payload: Any = None) -> None:
+def _log_emitter(
+    run_id: str, agent: str, event_type: str, message: str, payload: Any = None
+) -> None:
     """No-op-to-DB emitter: logs only, does NOT write agent_trace_events.
 
     Per the MVP decision, hardening does not emit trace events — the
@@ -112,8 +114,14 @@ def run_hardening(
     cfg = config or load_hardening_config()
     cfg = _with_defaults(cfg, target_registry)
     instance_id = resolve_build_instance(cfg)
-    log.info("hardening_run #%s started (source=%s target=%s:%s auto_sign=%s)",
-             run_id, source_image_ref, target_registry, published_tag, auto_sign)
+    log.info(
+        "hardening_run #%s started (source=%s target=%s:%s auto_sign=%s)",
+        run_id,
+        source_image_ref,
+        target_registry,
+        published_tag,
+        auto_sign,
+    )
 
     ctx = HardenContext(
         hardening_run_id=run_id,
@@ -166,7 +174,9 @@ def _run_lifecycle(
         set_status(sb, run_id, "preflight")
         pf = strategy.pre_flight_check(ctx)
         if not pf.ready:
-            return HardeningOutcome(status="failed", error_message=pf.blocking_reason or "pre-flight failed")
+            return HardeningOutcome(
+                status="failed", error_message=pf.blocking_reason or "pre-flight failed"
+            )
 
         # Backup
         backup = strategy.backup(ctx)
@@ -188,8 +198,12 @@ def _run_lifecycle(
         # Record publish + SBOM key as we learn them
         if ctx.published_digest:
             try:
-                set_published(sb, run_id, published_digest=ctx.published_digest,
-                              published_tag=ctx.published_tag)
+                set_published(
+                    sb,
+                    run_id,
+                    published_digest=ctx.published_digest,
+                    published_tag=ctx.published_tag,
+                )
             except Exception:  # noqa: BLE001, S110
                 pass
 
@@ -198,9 +212,7 @@ def _run_lifecycle(
         validations = strategy.validate(ctx)
         gate_failed = any((not v.passed) for v in validations)
 
-        sbom_key = (
-            f"sboms/{ctx.published_digest}.spdx.json" if ctx.published_digest else None
-        )
+        sbom_key = f"sboms/{ctx.published_digest}.spdx.json" if ctx.published_digest else None
         if sbom_key:
             try:
                 set_sbom_key(sb, run_id, sbom_key)

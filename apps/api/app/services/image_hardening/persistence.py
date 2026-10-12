@@ -87,16 +87,16 @@ def set_published(
 
 def set_sbom_key(sb: Any, hardening_run_id: int, sbom_s3_key: str) -> None:
     """Record the S3 key where the SBOM was uploaded."""
-    sb.table(_TABLE).update(
-        {"sbom_s3_key": sbom_s3_key, "updated_at": utcnow().isoformat()}
-    ).eq("id", hardening_run_id).execute()
+    sb.table(_TABLE).update({"sbom_s3_key": sbom_s3_key, "updated_at": utcnow().isoformat()}).eq(
+        "id", hardening_run_id
+    ).execute()
 
 
 def set_sign_dispatched(sb: Any, hardening_run_id: int, dispatched: bool) -> None:
     """Record whether the signing workflow was auto-dispatched."""
-    sb.table(_TABLE).update(
-        {"sign_dispatched": dispatched, "updated_at": utcnow().isoformat()}
-    ).eq("id", hardening_run_id).execute()
+    sb.table(_TABLE).update({"sign_dispatched": dispatched, "updated_at": utcnow().isoformat()}).eq(
+        "id", hardening_run_id
+    ).execute()
 
 
 # =============================================================================

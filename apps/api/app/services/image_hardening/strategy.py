@@ -194,19 +194,30 @@ class ImageHardenStrategy:
             except (RemoteExecError, CommandTimeoutError) as e:
                 results.append(
                     StepResult(
-                        step_num=num, action=action, command=command,
-                        stderr=f"{type(e).__name__}: {e}", exit_code=1, status="failed",
-                        started_at=started, finished_at=utcnow(),
+                        step_num=num,
+                        action=action,
+                        command=command,
+                        stderr=f"{type(e).__name__}: {e}",
+                        exit_code=1,
+                        status="failed",
+                        started_at=started,
+                        finished_at=utcnow(),
                     )
                 )
                 return False
             results.append(
                 StepResult(
-                    step_num=num, action=action, command=command,
-                    stdout=(r.stdout or "")[:4000], stderr=(r.stderr or "")[:2000],
-                    exit_code=r.exit_code, duration_ms=r.duration_ms,
+                    step_num=num,
+                    action=action,
+                    command=command,
+                    stdout=(r.stdout or "")[:4000],
+                    stderr=(r.stderr or "")[:2000],
+                    exit_code=r.exit_code,
+                    duration_ms=r.duration_ms,
                     status="success" if r.exit_code == 0 else "failed",
-                    started_at=started, finished_at=utcnow(), ssm_command_id=r.ssm_command_id,
+                    started_at=started,
+                    finished_at=utcnow(),
+                    ssm_command_id=r.ssm_command_id,
                 )
             )
             return r.exit_code == 0
@@ -230,11 +241,12 @@ class ImageHardenStrategy:
 
         # 4. resolve the pushed digest (needed for SBOM key + signing)
         digest_cmd = (
-            f"docker inspect --format='{{{{index .RepoDigests 0}}}}' {image_ref} "
-            f"| cut -d'@' -f2"
+            f"docker inspect --format='{{{{index .RepoDigests 0}}}}' {image_ref} | cut -d'@' -f2"
         )
         if step(4, "resolve digest", digest_cmd, 60):
-            digest = (results[-1].stdout or "").strip().splitlines()[-1] if results[-1].stdout else ""
+            digest = (
+                (results[-1].stdout or "").strip().splitlines()[-1] if results[-1].stdout else ""
+            )
             if digest.startswith("sha256:"):
                 ctx.published_digest = digest
                 self._emit(ctx, "MESSAGE", f"🔖 Published digest: {digest}")
@@ -246,8 +258,10 @@ class ImageHardenStrategy:
             sbom_cmd = f"syft {image_ref} -o spdx-json=/tmp/harden-sbom.spdx.json"
             if step(5, "generate SBOM", sbom_cmd, 300):
                 step(
-                    6, "upload SBOM",
-                    f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}", 120,
+                    6,
+                    "upload SBOM",
+                    f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}",
+                    120,
                 )
 
         return results
@@ -303,7 +317,8 @@ class ImageHardenStrategy:
         # ECR tag to a prior digest is a registry operation we note but keep
         # conservative (no destructive retag in the demo slice).
         self._emit(
-            ctx, "MESSAGE",
+            ctx,
+            "MESSAGE",
             f"↩ Rollback: prior digest for {self._image_ref(ctx)} was {prior} "
             f"(tag re-point left to operator in MVP).",
         )
