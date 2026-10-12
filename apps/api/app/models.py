@@ -26,6 +26,34 @@ class RunCreated(BaseModel):
     status: str
 
 
+# =============================================================================
+# Image Hardening (separate feature — not linked to the scanner pipeline)
+# =============================================================================
+class HardeningTriggerRequest(BaseModel):
+    """Payload to start an image-hardening run.
+
+    MVP: the auto_sign toggle is a request field (UI checkbox). A persisted
+    server-side default may be added later.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Image to harden (informational for the MVP sample; the build box builds
+    # the curated Dockerfile).
+    source_image_ref: str = Field(..., min_length=1, max_length=512)
+    # ECR repository URL to publish to (no tag).
+    target_registry: str = Field(..., min_length=1, max_length=512)
+    # Tag to publish under (e.g. v0.1.0). IMMUTABLE repos need a fresh tag per run.
+    published_tag: str = Field(..., min_length=1, max_length=128)
+    # When true, auto-dispatch the signing workflow after a successful publish.
+    auto_sign: bool = False
+
+
+class HardeningRunCreated(BaseModel):
+    hardening_run_id: int
+    status: str
+
+
 class LLMNormalizedIssue(BaseModel):
     """The fields Sub-Agent 1 (LLM) is responsible for producing.
 

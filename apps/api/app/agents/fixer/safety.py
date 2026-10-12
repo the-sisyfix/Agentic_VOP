@@ -214,6 +214,10 @@ _ALLOWED_WORKING_DIRECTORIES: tuple[str, ...] = (
     "/opt/vuln-labs/",
     "/tmp/fixer-scratch/",  # noqa: S108 — intentional scratch dir for fixer strategies
     "/",  # OS strategy runs apt-get from root (no specific workdir)
+    # Image Hardening (separate feature) reuses this validator as a library and
+    # builds in its own clone dir on the dedicated build EC2. Additive entry —
+    # does not change validation for any existing fixer strategy.
+    "/opt/image-forge-src/",
 )
 
 
