@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     # AWS region for env2 + SSM RunCommand calls.
     aws_region: str = "us-east-1"
 
+    # --- Image Hardening (separate feature; see app/services/image_hardening) ---
+    # Core runtime config for the hardening pipeline. These are permanent
+    # production settings (not test-only) — only the VALUES change per
+    # environment. The registry can also be overridden per-request via the
+    # trigger's target_registry (orchestrator._with_defaults); the setting is
+    # the fallback/default. The build-instance id is the MVP/fallback path and
+    # coexists with the future ephemeral-box seam (resolve_build_instance).
+    hardening_build_instance_id: str = ""  # dedicated build EC2 (SSM-managed)
+    hardening_ecr_repository_url: str = ""  # ECR repo URL (push target, no tag)
+    hardening_sbom_bucket: str = ""  # S3 bucket for SBOM artifacts
+
     # --- HITL v2 Git-native review (Phase B, side experiment) ------------
     # All optional. When any of these are empty, the git-review flow is
     # simply unavailable — existing HITL v1 + sandbox review + auto-demo
