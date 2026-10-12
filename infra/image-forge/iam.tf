@@ -162,8 +162,8 @@ resource "aws_iam_role" "ci_image_sign" {
           # Stricter than most existing roles here, which use repo:...:* (any ref).
           StringLike = {
             "token.actions.githubusercontent.com:sub" = [
-              "repo:${var.github_repository}:ref:refs/heads/main",
-              "repo:${var.github_repository}:environment:*"
+              "${var.github_subject_prefix}:ref:refs/heads/main",
+              "${var.github_subject_prefix}:environment:*"
             ]
           }
         }

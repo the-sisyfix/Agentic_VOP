@@ -21,6 +21,9 @@ locals {
 
   # GitHub repository for OIDC conditions
   github_repository = var.github_repository
+
+  # Immutable OIDC subject prefix: repo:<owner>@<owner_id>/<repo>@<repo_id>
+  github_subject_prefix = var.github_subject_prefix
 }
 
 # =============================================================================
@@ -42,7 +45,7 @@ resource "aws_iam_role" "infra_plan" {
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:*"
           }
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
@@ -215,7 +218,7 @@ resource "aws_iam_role" "infra_apply" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:*"
           }
         }
       }
@@ -417,7 +420,7 @@ resource "aws_iam_role" "lambda_deploy" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:*"
           }
         }
       }
@@ -483,7 +486,7 @@ resource "aws_iam_role" "backfill" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:*"
           }
         }
       }
@@ -738,7 +741,7 @@ resource "aws_iam_role" "ec2_infra_apply" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = "repo:${local.github_repository}:*"
+            "token.actions.githubusercontent.com:sub" = "${local.github_subject_prefix}:*"
           }
         }
       }
@@ -922,6 +925,152 @@ resource "aws_iam_role_policy" "ec2_infra_apply" {
           "dynamodb:DeleteItem"
         ]
         Resource = "arn:aws:dynamodb:${var.aws_region}:${local.account_id}:table/sisyfix-terraform-locks"
+      }
+    ]
+  })
+}
+
+# =============================================================================
+# 8b. VULN-LABS DEPLOY ROLE (CI role for the vuln-labs GitHub Actions workflow)
+# Previously created out-of-band (not in Terraform). Imported here so its OIDC
+# trust tracks the repo like every other CI role. Global name (no env suffix),
+# same deploy-style trust as app-deploy/image-sign.
+# =============================================================================
+
+import {
+  to = aws_iam_role.vuln_labs_deploy
+  id = "sisyfix-github-vuln-labs-deploy"
+}
+
+resource "aws_iam_role" "vuln_labs_deploy" {
+  name                 = "sisyfix-github-vuln-labs-deploy"
+  max_session_duration = 3600
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowGitHubOIDCDeploy"
+        Effect = "Allow"
+        Principal = {
+          Federated = local.github_oidc_provider_arn
+        }
+        Action = "sts:AssumeRoleWithWebIdentity"
+        Condition = {
+          StringEquals = {
+            "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          }
+          StringLike = {
+            "token.actions.githubusercontent.com:sub" = [
+              "${local.github_subject_prefix}:ref:refs/heads/main",
+              "${local.github_subject_prefix}:environment:*"
+            ]
+          }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Component = "ci-cd"
+    Role      = "vuln-labs-deploy"
+  }
+}
+
+resource "aws_iam_role_policy" "vuln_labs_deploy" {
+  name = "sisyfix-github-vuln-labs-deployPolicy"
+  role = aws_iam_role.vuln_labs_deploy.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "EC2Management"
+        Effect = "Allow"
+        Action = [
+          "ec2:Describe*",
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "ec2:StartInstances",
+          "ec2:StopInstances",
+          "ec2:CreateSecurityGroup",
+          "ec2:DeleteSecurityGroup",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:RevokeSecurityGroupIngress",
+          "ec2:AuthorizeSecurityGroupEgress",
+          "ec2:RevokeSecurityGroupEgress",
+          "ec2:ImportKeyPair",
+          "ec2:CreateKeyPair",
+          "ec2:DeleteKeyPair",
+          "ec2:CreateTags",
+          "ec2:DeleteTags",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:AssociateIamInstanceProfile",
+          "ec2:DisassociateIamInstanceProfile"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "IAMForVulnLabs"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:TagRole",
+          "iam:UntagRole",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRolePolicy",
+          "iam:CreateInstanceProfile",
+          "iam:DeleteInstanceProfile",
+          "iam:GetInstanceProfile",
+          "iam:TagInstanceProfile",
+          "iam:UntagInstanceProfile",
+          "iam:AddRoleToInstanceProfile",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:PassRole"
+        ]
+        Resource = [
+          "arn:aws:iam::${local.account_id}:role/vop-vuln-lab-*",
+          "arn:aws:iam::${local.account_id}:instance-profile/vop-vuln-lab-*"
+        ]
+      },
+      {
+        Sid    = "TerraformState"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
+        ]
+        Resource = [
+          "arn:aws:s3:::sisyfix-terraform-state-${local.account_id}",
+          "arn:aws:s3:::sisyfix-terraform-state-${local.account_id}/vuln-labs/*"
+        ]
+      },
+      {
+        Sid    = "TerraformLock"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
+        Resource = "arn:aws:dynamodb:${var.aws_region}:${local.account_id}:table/sisyfix-terraform-locks"
+      },
+      {
+        Sid    = "STSIdentity"
+        Effect = "Allow"
+        Action = [
+          "sts:GetCallerIdentity"
+        ]
+        Resource = "*"
       }
     ]
   })
