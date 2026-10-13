@@ -61,7 +61,7 @@ mkdir -p /opt/vuln-labs/appsec-lab/uploads
 mkdir -p /opt/vuln-labs/appsec-lab/data
 echo "sensitive internal data" > /opt/vuln-labs/appsec-lab/data/secrets.txt
 
-APPSEC_BASE="https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs/appsec-lab"
+APPSEC_BASE="https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/appsec-lab"
 curl -fsSL "$APPSEC_BASE/app.py" -o /opt/vuln-labs/appsec-lab/app.py
 curl -fsSL "$APPSEC_BASE/auth.py" -o /opt/vuln-labs/appsec-lab/auth.py
 curl -fsSL "$APPSEC_BASE/file_handler.py" -o /opt/vuln-labs/appsec-lab/file_handler.py
@@ -174,7 +174,7 @@ timeout 300 docker build -t vuln-python-image:latest . || echo "WARNING: python-
 mkdir -p /opt/vuln-labs/cspm-lab
 
 # Download CSPM lab template and substitute placeholders
-curl -fsSL "https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs/cspm-lab-template.tf" \
+curl -fsSL "https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/cspm-lab-template.tf" \
   -o /opt/vuln-labs/cspm-lab/main.tf
 sed -i "s/NAME_PLACEHOLDER/${name_prefix}/g" /opt/vuln-labs/cspm-lab/main.tf
 sed -i "s/REGION_PLACEHOLDER/${aws_region}/g" /opt/vuln-labs/cspm-lab/main.tf
@@ -202,7 +202,7 @@ terraform apply -auto-approve -input=false || echo "WARNING: CSPM lab terraform 
 # =============================================================================
 mkdir -p /opt/vuln-labs/serverless-lab
 
-SERVERLESS_BASE="https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs"
+SERVERLESS_BASE="https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs"
 curl -fsSL "$SERVERLESS_BASE/serverless-lab-template.tf" \
   -o /opt/vuln-labs/serverless-lab/main.tf
 curl -fsSL "$SERVERLESS_BASE/serverless-lab/lambda_function.py" \
@@ -281,7 +281,7 @@ pip3 install checkov --break-system-packages 2>/dev/null || pip3 install checkov
 # 6. Install and Start Scan Server (scan-source role only)
 # Download from GitHub to keep user-data under the 16KB limit.
 # =============================================================================
-curl -fsSL "https://raw.githubusercontent.com/arshiya19/Agentic_VOP/main/infra/vuln-labs/scan-server.py" \
+curl -fsSL "https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/scan-server.py" \
   -o /opt/vuln-labs/scan-server.py
 
 # Replace port placeholder if needed

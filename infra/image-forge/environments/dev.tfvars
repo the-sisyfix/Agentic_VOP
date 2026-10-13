@@ -4,7 +4,12 @@ aws_region = "us-east-1"
 # GitHub repo whose Actions OIDC identity is trusted to sign images (gated to
 # main). Change this single value if/when the repo migrates to a new owner,
 # then re-apply — and update the verification identity in the signing design.
-github_repository = "arshiya19/Agentic_VOP"
+github_repository = "the-sisyfix/Agentic_VOP"
+
+# Immutable OIDC subject prefix (owner-id + repo-id embedded). Source of truth:
+# repo Settings > Actions > OIDC "Default subject claim prefix". This prefix is
+# also the cosign --certificate-identity base — update image verifiers to match.
+github_subject_prefix = "repo:the-sisyfix@339457570/Agentic_VOP@1223959649"
 
 # VPC CIDR reuses 10.1.0.0/16 — freed by deleting the manual VOP-vpc-adhoc VPC.
 vpc_cidr           = "10.1.0.0/16"
