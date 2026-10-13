@@ -15,12 +15,27 @@ variable "aws_region" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository in 'owner/repo' format for the OIDC trust policy on the CI signing role. Change this one value when the repo migrates to a new owner."
+  description = "GitHub repository in 'owner/repo' format. Used for non-OIDC references. OIDC trust on the CI signing role uses github_subject_prefix."
   type        = string
 
   validation {
     condition     = can(regex("^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$", var.github_repository))
     error_message = "github_repository must be in 'owner/repo' format."
+  }
+}
+
+variable "github_subject_prefix" {
+  description = <<-EOT
+    Immutable OIDC subject-claim prefix for the CI signing role's trust policy, in the form
+    'repo:<owner>@<owner_id>/<repo>@<repo_id>'. Copy from the repo's Settings > Actions > OIDC
+    "Default subject claim prefix". Trust conditions append the usual suffixes.
+    NOTE: this prefix is also the cosign --certificate-identity base; update verifiers accordingly.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^repo:[a-zA-Z0-9_.-]+@[0-9]+/[a-zA-Z0-9_.-]+@[0-9]+$", var.github_subject_prefix))
+    error_message = "github_subject_prefix must look like 'repo:<owner>@<owner_id>/<repo>@<repo_id>'."
   }
 }
 
