@@ -18,6 +18,9 @@ difference from the vulnerability fixer.
 
 from __future__ import annotations
 
+import boto3
+from botocore.config import Config as BotoConfig
+
 from app.agents.fixer.config import FixerConfig
 from app.agents.fixer.safety import validate_command
 from app.agents.fixer.tools.remote_exec import (
@@ -68,12 +71,30 @@ class ImageHardenStrategy:
             pass
 
     def _executor(self, ctx: HardenContext) -> RemoteExecutor:
+        # Inject an SSM client with a GENEROUS read timeout. The default boto3
+        # read_timeout (~60s) is too low for our polling across a multi-minute
+        # `docker build` — a socket read would raise ReadTimeout mid-build (the
+        # cause of the first e2e failure). Image builds legitimately run for
+        # minutes, so size the client read timeout above the longest SSM command
+        # timeout (docker build = 900s). We inject it rather than change the
+        # shared RemoteExecutor/FixerConfig (isolation: no edits to fixer code).
+        # max_attempts=1 avoids boto3 silently retrying a long poll call.
+        ssm_client = boto3.client(
+            "ssm",
+            region_name=ctx.aws_region,
+            config=BotoConfig(
+                connect_timeout=15,
+                read_timeout=1000,
+                retries={"max_attempts": 1},
+            ),
+        )
         return RemoteExecutor(
             ctx.build_instance_id,
             region=ctx.aws_region,
             config=self._exec_config,
             emit_fn=self.emit_fn,
             run_id=str(ctx.hardening_run_id),
+            ssm_client=ssm_client,
         )
 
     def _run(self, executor: RemoteExecutor, command: str, *, workdir: str, timeout_s: int):
