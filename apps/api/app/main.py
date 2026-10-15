@@ -237,6 +237,7 @@ def trigger_hardening(
             target_registry=payload.target_registry,
             published_tag=payload.published_tag,
             auto_sign=payload.auto_sign,
+            mode=payload.mode,
             sb=sb,
         )
     except RuntimeError as e:
@@ -250,6 +251,7 @@ def trigger_hardening(
                 target_registry=payload.target_registry,
                 published_tag=payload.published_tag,
                 auto_sign=payload.auto_sign,
+                mode=payload.mode,
                 sb=sb,
             )
         except Exception:  # noqa: BLE001

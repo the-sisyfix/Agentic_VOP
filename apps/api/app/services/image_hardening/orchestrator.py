@@ -31,10 +31,16 @@ from .persistence import (
     set_sign_dispatched,
     set_status,
 )
+from .copa_strategy import CopaPatchStrategy
 from .signing import dispatch_signing_workflow
 from .strategy import ImageHardenStrategy
 
 log = logging.getLogger("image_hardening")
+
+# Remediation modes. "patch" = copa in-place OS patch (image-ref path, primary).
+# "rebuild" = build-from-Dockerfile (secondary; wired in the next increment).
+MODE_PATCH = "patch"
+MODE_REBUILD = "rebuild"
 
 
 def _log_emitter(
@@ -55,6 +61,7 @@ def create_run_record(
     published_tag: str,
     auto_sign: bool,
     sb: Any,
+    mode: str = MODE_PATCH,  # noqa: ARG001 — reserved for persistence when a mode column is added
     config: HardeningConfig | None = None,
 ) -> int:
     """Create the hardening_runs row synchronously and return its id.
@@ -96,17 +103,20 @@ def run_hardening(
     published_tag: str,
     auto_sign: bool,
     sb: Any,
+    mode: str = MODE_PATCH,
     config: HardeningConfig | None = None,
 ) -> int:
     """Run the pipeline for an ALREADY-CREATED hardening_runs row.
 
     Args:
         run_id:           the hardening_runs row id (from create_run_record)
-        source_image_ref: image to harden (informational for the MVP sample)
+        source_image_ref: client image to harden (ref/digest)
         target_registry:  ECR repo URL (push target, no tag)
         published_tag:    tag to publish under (e.g. v0.1.0)
         auto_sign:        if True, dispatch the signing workflow after publish
         sb:               supabase client (public or demo — selects the schema)
+        mode:             "patch" (copa in-place, primary) or "rebuild"
+                          (Dockerfile; wired next increment)
         config:           optional HardeningConfig; loaded from settings if None
 
     Pipeline failures are captured in the hardening_runs row, not raised.
@@ -115,8 +125,9 @@ def run_hardening(
     cfg = _with_defaults(cfg, target_registry)
     instance_id = resolve_build_instance(cfg)
     log.info(
-        "hardening_run #%s started (source=%s target=%s:%s auto_sign=%s)",
+        "hardening_run #%s started (mode=%s source=%s target=%s:%s auto_sign=%s)",
         run_id,
+        mode,
         source_image_ref,
         target_registry,
         published_tag,
@@ -133,10 +144,15 @@ def run_hardening(
         sbom_bucket=cfg.sbom_bucket or None,
         auto_sign=auto_sign,
     )
-    strategy = ImageHardenStrategy(config=cfg, emit_fn=_log_emitter)
     started_at = utcnow()
 
-    outcome = _run_lifecycle(sb, run_id, strategy, ctx, started_at=started_at)
+    if mode == MODE_PATCH:
+        copa = CopaPatchStrategy(config=cfg, emit_fn=_log_emitter)
+        outcome = _run_copa_lifecycle(sb, run_id, copa, ctx, cfg=cfg, started_at=started_at)
+    else:
+        # Rebuild path (build-from-Dockerfile) — the proven prototype flow.
+        strategy = ImageHardenStrategy(config=cfg, emit_fn=_log_emitter)
+        outcome = _run_lifecycle(sb, run_id, strategy, ctx, started_at=started_at)
 
     # 4. Best-effort auto-sign AFTER a successful publish.
     if auto_sign and outcome.status == "success" and ctx.published_digest:
@@ -251,6 +267,198 @@ def _run_lifecycle(
             status="failed",
             error_message=f"orchestrator crashed: {type(e).__name__}: {str(e)[:400]}",
         )
+
+
+def _run_copa_lifecycle(
+    sb: Any,
+    run_id: int,
+    copa: CopaPatchStrategy,
+    ctx: HardenContext,
+    *,
+    cfg: HardeningConfig,
+    started_at,
+) -> HardeningOutcome:
+    """Copa in-place patch lifecycle (image-ref path).
+
+    preflight → remediation loop (scan→patch→re-scan) → gate →
+    (on clean) publish the patched image at the client's tag + SBOM.
+
+    Residual DEPENDENCY/app CVEs that copa cannot fix are reported honestly in
+    scan_summary (they need the rebuild leg — next increment).
+    """
+    try:
+        set_status(sb, run_id, "preflight")
+        pf = copa.pre_flight_check(ctx)
+        if not pf.ready:
+            return HardeningOutcome(
+                status="failed", error_message=pf.blocking_reason or "pre-flight failed"
+            )
+
+        set_status(sb, run_id, "scanning")
+        result = copa.remediate(ctx, ctx.source_image_ref)
+        steps = result["steps"]
+        final_scan = result["final_scan"]
+        gate = copa.build_gate_validation(final_scan)
+
+        # Loop error → failed, no publish.
+        if result["status"] == "error":
+            return HardeningOutcome(
+                status="failed",
+                step_results=steps,
+                validation_results=[gate],
+                scan_summary={"copa_loop": result["status"], "detail": result["message"]},
+                error_message=result["message"],
+            )
+
+        # Not clean (unfixable / exhausted) → gate fails, no publish.
+        # scan_summary records WHY, incl. the honest "needs rebuild leg" note.
+        if result["status"] != "clean":
+            return HardeningOutcome(
+                status="failed",
+                step_results=steps,
+                validation_results=[gate],
+                scan_summary={
+                    "copa_loop": result["status"],
+                    "detail": result["message"],
+                    "note": "residual findings may be dependency/app-level — "
+                    "needs the rebuild leg (next increment) or are unfixable",
+                },
+                error_message=result["message"],
+            )
+
+        # Clean → publish the patched image at the client's intended tag.
+        set_status(sb, run_id, "publishing")
+        publish_steps = _copa_publish(copa, ctx, result["final_image_ref"], cfg)
+        steps.extend(publish_steps)
+        if any(s.status == "failed" for s in publish_steps):
+            return HardeningOutcome(
+                status="failed",
+                step_results=steps,
+                validation_results=[gate],
+                scan_summary={"copa_loop": "clean", "publish": "failed"},
+                error_message="patched image publish failed",
+            )
+
+        if ctx.published_digest:
+            try:
+                set_published(
+                    sb,
+                    run_id,
+                    published_digest=ctx.published_digest,
+                    published_tag=ctx.published_tag,
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+        sbom_key = f"sboms/{ctx.published_digest}.spdx.json" if ctx.published_digest else None
+        if sbom_key:
+            try:
+                set_sbom_key(sb, run_id, sbom_key)
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+        return HardeningOutcome(
+            status="success",
+            step_results=steps,
+            validation_results=[gate],
+            published_digest=ctx.published_digest,
+            published_tag=ctx.published_tag,
+            sbom_s3_key=sbom_key,
+            scan_summary={"copa_loop": "clean", "iterations": result["iterations"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("hardening_run #%s (copa) crashed", run_id)
+        return HardeningOutcome(
+            status="failed",
+            error_message=f"orchestrator crashed: {type(e).__name__}: {str(e)[:400]}",
+        )
+
+
+def _copa_publish(
+    copa: CopaPatchStrategy,
+    ctx: HardenContext,
+    patched_ref: str,
+    cfg: HardeningConfig,
+) -> list:
+    """Push the clean patched image at the client's intended tag, resolve its
+    digest (set on ctx), and upload the SBOM. Returns StepResults.
+
+    Reuses the copa strategy's executor + safety-validated _run. Command shapes
+    mirror the proven rebuild path's publish tail.
+    """
+    from .models import StepResult  # noqa: PLC0415
+
+    executor = copa._executor(ctx)  # noqa: SLF001 — same package, intentional reuse
+    wd = cfg.copa_scratch_dir
+    final_ref = f"{ctx.target_registry}:{ctx.published_tag}"
+    steps: list = []
+
+    def step(num, action, command, timeout_s):
+        start = utcnow()
+        try:
+            r = copa._run(executor, command, workdir=wd, timeout_s=timeout_s)  # noqa: SLF001
+        except Exception as e:  # noqa: BLE001
+            steps.append(
+                StepResult(
+                    step_num=num,
+                    action=action,
+                    command=command,
+                    stderr=f"{type(e).__name__}: {e}",
+                    exit_code=1,
+                    status="failed",
+                    started_at=start,
+                    finished_at=utcnow(),
+                )
+            )
+            return False
+        steps.append(
+            StepResult(
+                step_num=num,
+                action=action,
+                command=command,
+                stdout=(r.stdout or "")[:2000],
+                stderr=(r.stderr or "")[:1000],
+                exit_code=r.exit_code,
+                duration_ms=r.duration_ms,
+                status="success" if r.exit_code == 0 else "failed",
+                started_at=start,
+                finished_at=utcnow(),
+                ssm_command_id=r.ssm_command_id,
+            )
+        )
+        return r.exit_code == 0
+
+    # ECR login + retag the patched image to the client's intended tag + push.
+    login = (
+        f"aws ecr get-login-password --region {ctx.aws_region} "
+        f"| docker login --username AWS --password-stdin {ctx.target_registry.split('/')[0]}"
+    )
+    if not step(10, "ECR login", login, 120):
+        return steps
+    if not step(11, "retag patched", f"docker tag {patched_ref} {final_ref}", 60):
+        return steps
+    if not step(12, "push patched", f"docker push {final_ref}", 600):
+        return steps
+
+    digest_cmd = (
+        f"docker inspect --format='{{{{index .RepoDigests 0}}}}' {final_ref} | cut -d'@' -f2"
+    )
+    if step(13, "resolve digest", digest_cmd, 60):
+        out = (steps[-1].stdout or "").strip().splitlines()
+        digest = out[-1] if out else ""
+        if digest.startswith("sha256:"):
+            ctx.published_digest = digest
+
+    if ctx.published_digest and (ctx.sbom_bucket or cfg.sbom_bucket):
+        bucket = ctx.sbom_bucket or cfg.sbom_bucket
+        key = f"sboms/{ctx.published_digest}.spdx.json"
+        if step(
+            14, "generate SBOM", f"syft {final_ref} -o spdx-json=/tmp/harden-sbom.spdx.json", 300
+        ):
+            step(
+                15, "upload SBOM", f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}", 120
+            )
+
+    return steps
 
 
 def _with_defaults(cfg: HardeningConfig, target_registry: str) -> HardeningConfig:

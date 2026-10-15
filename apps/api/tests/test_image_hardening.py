@@ -448,3 +448,167 @@ def _copa_ctx() -> HardenContext:
         build_instance_id="i-test",
         aws_region="us-east-1",
     )
+
+
+# ===========================================================================
+# Orchestrator routing + copa lifecycle mapping (Model B)
+# ===========================================================================
+from app.services.image_hardening import orchestrator as orch  # noqa: E402
+
+
+class _FakeSB:
+    """Minimal supabase stand-in: swallow .table(...).update(...).eq(...).execute()."""
+
+    def table(self, *_a, **_k):
+        return self
+
+    def update(self, *_a, **_k):
+        return self
+
+    def eq(self, *_a, **_k):
+        return self
+
+    def execute(self, *_a, **_k):
+        return self
+
+
+def _clean_scan():
+    return CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="")
+
+
+def test_run_hardening_mode_patch_routes_to_copa(monkeypatch):
+    """mode='patch' must invoke the copa lifecycle, not the rebuild lifecycle."""
+    called = {"copa": False, "rebuild": False}
+
+    def fake_copa_lifecycle(*_a, **_k):
+        called["copa"] = True
+        from app.services.image_hardening.models import HardeningOutcome
+
+        return HardeningOutcome(status="success")
+
+    def fake_rebuild_lifecycle(*_a, **_k):
+        called["rebuild"] = True
+        from app.services.image_hardening.models import HardeningOutcome
+
+        return HardeningOutcome(status="success")
+
+    monkeypatch.setattr(orch, "_run_copa_lifecycle", fake_copa_lifecycle)
+    monkeypatch.setattr(orch, "_run_lifecycle", fake_rebuild_lifecycle)
+    monkeypatch.setattr(orch, "resolve_build_instance", lambda _cfg: "i-test")
+    monkeypatch.setattr(orch, "finalize_hardening_run", lambda *a, **k: None)
+
+    orch.run_hardening(
+        run_id=1,
+        source_image_ref="img:latest",
+        target_registry="r/repo",
+        published_tag="v1",
+        auto_sign=False,
+        mode=orch.MODE_PATCH,
+        sb=_FakeSB(),
+        config=HardeningConfig(build_instance_id="i-test"),
+    )
+    assert called["copa"] is True
+    assert called["rebuild"] is False
+
+
+def test_run_hardening_mode_rebuild_routes_to_rebuild(monkeypatch):
+    called = {"copa": False, "rebuild": False}
+
+    def fake_copa_lifecycle(*_a, **_k):
+        called["copa"] = True
+        from app.services.image_hardening.models import HardeningOutcome
+
+        return HardeningOutcome(status="success")
+
+    def fake_rebuild_lifecycle(*_a, **_k):
+        called["rebuild"] = True
+        from app.services.image_hardening.models import HardeningOutcome
+
+        return HardeningOutcome(status="success")
+
+    monkeypatch.setattr(orch, "_run_copa_lifecycle", fake_copa_lifecycle)
+    monkeypatch.setattr(orch, "_run_lifecycle", fake_rebuild_lifecycle)
+    monkeypatch.setattr(orch, "resolve_build_instance", lambda _cfg: "i-test")
+    monkeypatch.setattr(orch, "finalize_hardening_run", lambda *a, **k: None)
+
+    orch.run_hardening(
+        run_id=1,
+        source_image_ref="img:latest",
+        target_registry="r/repo",
+        published_tag="v1",
+        auto_sign=False,
+        mode=orch.MODE_REBUILD,
+        sb=_FakeSB(),
+        config=HardeningConfig(build_instance_id="i-test"),
+    )
+    assert called["rebuild"] is True
+    assert called["copa"] is False
+
+
+def test_copa_lifecycle_clean_publishes_success(monkeypatch):
+    """clean loop + successful publish → success outcome with digest."""
+    cfg = HardeningConfig(build_instance_id="i-test", sbom_bucket="b")
+    copa = CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
+    ctx = _copa_ctx()
+
+    monkeypatch.setattr(copa, "pre_flight_check", lambda _c: _pf_ready())
+    monkeypatch.setattr(
+        copa,
+        "remediate",
+        lambda _c, _ref: {
+            "status": "clean",
+            "iterations": 1,
+            "final_image_ref": f"{ctx.target_registry}:{ctx.published_tag}-copa1",
+            "steps": [],
+            "final_scan": _clean_scan(),
+            "message": "clean",
+        },
+    )
+
+    # Stub the publish tail to set a digest and report success.
+    def fake_publish(_copa, c, _ref, _cfg):
+        c.published_digest = "sha256:deadbeef"
+        return [_ok_step("push patched")]
+
+    monkeypatch.setattr(orch, "_copa_publish", fake_publish)
+
+    outcome = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert outcome.status == "success"
+    assert outcome.published_digest == "sha256:deadbeef"
+    assert outcome.validation_results[0].passed is True
+
+
+def test_copa_lifecycle_unfixable_fails_no_publish(monkeypatch):
+    """unfixable loop → failed outcome, publish NOT attempted."""
+    cfg = HardeningConfig(build_instance_id="i-test")
+    copa = CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
+    ctx = _copa_ctx()
+    published = {"called": False}
+
+    monkeypatch.setattr(copa, "pre_flight_check", lambda _c: _pf_ready())
+    monkeypatch.setattr(
+        copa,
+        "remediate",
+        lambda _c, _ref: {
+            "status": "unfixable",
+            "iterations": 1,
+            "final_image_ref": _ref,
+            "steps": [],
+            "final_scan": CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary=""),
+            "message": "needs rebuild leg",
+        },
+    )
+    monkeypatch.setattr(
+        orch, "_copa_publish", lambda *a, **k: published.__setitem__("called", True) or []
+    )
+
+    outcome = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert outcome.status == "failed"
+    assert published["called"] is False
+    assert outcome.validation_results[0].passed is False
+
+
+def _pf_ready():
+    from app.services.image_hardening.models import PreFlightResult
+
+    return PreFlightResult(ready=True)

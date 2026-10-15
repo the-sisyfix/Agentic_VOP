@@ -47,6 +47,11 @@ class HardeningTriggerRequest(BaseModel):
     published_tag: str = Field(..., min_length=1, max_length=128)
     # When true, auto-dispatch the signing workflow after a successful publish.
     auto_sign: bool = False
+    # Remediation mode: "patch" = copa in-place OS patch (default, primary);
+    # "rebuild" = build-from-Dockerfile (dependency/toolchain fixes; wired next).
+    mode: Literal["patch", "rebuild"] = "patch"
+    # Optional Dockerfile path on the build box — only used by "rebuild" mode.
+    dockerfile_path: str | None = None
 
 
 class HardeningRunCreated(BaseModel):
