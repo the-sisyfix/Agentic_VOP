@@ -16,13 +16,14 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from app.agents.fixer import safety
 from app.agents.fixer.models import CommandResult
 from app.services.image_hardening.config import HardeningConfig
-from app.services.image_hardening.models import HardenContext
+from app.services.image_hardening.models import HardenContext, StepResult
 from app.services.image_hardening.signing import dispatch_signing_workflow
 from app.services.image_hardening.strategy import ImageHardenStrategy
 
@@ -252,3 +253,198 @@ def test_strategy_is_instance_agnostic_uses_ctx_instance():
     # First positional arg to RemoteExecutor is the instance id from ctx.
     args, _kwargs = mock_exec.call_args
     assert args[0] == "i-ephemeral-123"
+
+
+# ===========================================================================
+# Model B — CopaPatchStrategy (image-ref in-place patch path)
+# ===========================================================================
+from app.services.image_hardening.copa_strategy import (  # noqa: E402
+    CopaPatchStrategy,
+    CopaScanResult,
+)
+
+
+def _copa_strat() -> CopaPatchStrategy:
+    cfg = HardeningConfig(
+        aws_region="us-east-1",
+        build_instance_id="i-test",
+        ecr_repository_url="486655355038.dkr.ecr.us-east-1.amazonaws.com/sisyfix-hardened-base-test",
+        max_remediation_iterations=3,
+    )
+    return CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
+
+
+# ---- trivy report parsing ----
+def test_count_fixable_parses_critical_high_with_fixedversion():
+    report = json.dumps(
+        {
+            "Results": [
+                {
+                    "Vulnerabilities": [
+                        {"Severity": "CRITICAL", "FixedVersion": "1.2.3"},
+                        {"Severity": "HIGH", "FixedVersion": "4.5.6"},
+                        {"Severity": "HIGH", "FixedVersion": None},  # not fixable → excluded
+                        {"Severity": "MEDIUM", "FixedVersion": "7.8.9"},  # not gated
+                    ]
+                }
+            ]
+        }
+    )
+    crit, high = CopaPatchStrategy._count_fixable(report)
+    assert crit == 1
+    assert high == 1  # the no-FixedVersion HIGH is excluded
+
+
+def test_count_fixable_handles_empty_or_malformed():
+    assert CopaPatchStrategy._count_fixable("{}") == (0, 0)
+    assert CopaPatchStrategy._count_fixable("not json") == (0, 0)
+    assert CopaPatchStrategy._count_fixable('{"Results": null}') == (0, 0)
+
+
+def test_scan_result_gate_property():
+    assert (
+        CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="").has_fixable_gate_findings
+        is False
+    )
+    assert (
+        CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary="").has_fixable_gate_findings
+        is True
+    )
+    assert (
+        CopaScanResult(fixable_critical=0, fixable_high=2, raw_summary="").has_fixable_gate_findings
+        is True
+    )
+
+
+def test_gate_validation_pass_fail():
+    strat = _copa_strat()
+    clean = CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="")
+    dirty = CopaScanResult(fixable_critical=2, fixable_high=1, raw_summary="")
+    assert strat.build_gate_validation(clean).passed is True
+    assert strat.build_gate_validation(clean).is_rescan is True
+    assert strat.build_gate_validation(dirty).passed is False
+    assert strat.build_gate_validation(None).passed is False
+
+
+# ---- remediation loop control flow (scan/patch methods mocked) ----
+def _ok_step(action="copa patch"):
+    return StepResult(
+        step_num=0,
+        action=action,
+        command="x",
+        exit_code=0,
+        status="success",
+        started_at=_now(),
+        finished_at=_now(),
+    )
+
+
+def test_loop_already_clean_at_intake():
+    """Zero fixable at intake → clean, 0 iterations, no patch attempted."""
+    strat = _copa_strat()
+    clean = CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="")
+    with (
+        patch.object(strat, "_executor", return_value=MagicMock()),
+        patch.object(strat, "_scan_to_report", return_value=clean),
+        patch.object(strat, "ensure_buildkit") as mock_bk,
+    ):
+        out = strat.remediate(_copa_ctx(), "img:latest")
+    assert out["status"] == "clean"
+    assert out["iterations"] == 0
+    mock_bk.assert_not_called()  # no patching path entered
+
+
+def test_loop_clean_after_one_patch():
+    """Dirty → patch → clean on re-scan → status clean, 1 iteration."""
+    strat = _copa_strat()
+    dirty = CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary="")
+    clean = CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="")
+    with (
+        patch.object(strat, "_executor", return_value=MagicMock()),
+        patch.object(strat, "_scan_to_report", side_effect=[dirty, clean]),
+        patch.object(strat, "ensure_buildkit", return_value=_ok_step("ensure buildkit")),
+        patch.object(strat, "patch_once", return_value=_ok_step()),
+    ):
+        out = strat.remediate(_copa_ctx(), "img:latest")
+    assert out["status"] == "clean"
+    assert out["iterations"] == 1
+
+
+def test_loop_unfixable_when_no_progress():
+    """Patch runs but counts don't drop → unfixable (copa can't fix non-OS deps)."""
+    strat = _copa_strat()
+    dirty = CopaScanResult(fixable_critical=2, fixable_high=0, raw_summary="")
+    with (
+        patch.object(strat, "_executor", return_value=MagicMock()),
+        patch.object(strat, "_scan_to_report", side_effect=[dirty, dirty]),
+        patch.object(strat, "ensure_buildkit", return_value=_ok_step("ensure buildkit")),
+        patch.object(strat, "patch_once", return_value=_ok_step()),
+    ):
+        out = strat.remediate(_copa_ctx(), "img:latest")
+    assert out["status"] == "unfixable"
+
+
+def test_loop_exhausted_after_cap():
+    """Counts keep dropping but never reach zero within the cap → exhausted."""
+    strat = _copa_strat()
+    # 3 iterations cap; counts decrease each time but stay > 0.
+    scans = [
+        CopaScanResult(fixable_critical=4, fixable_high=0, raw_summary=""),  # intake
+        CopaScanResult(fixable_critical=3, fixable_high=0, raw_summary=""),  # after 1
+        CopaScanResult(fixable_critical=2, fixable_high=0, raw_summary=""),  # after 2
+        CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary=""),  # after 3
+    ]
+    with (
+        patch.object(strat, "_executor", return_value=MagicMock()),
+        patch.object(strat, "_scan_to_report", side_effect=scans),
+        patch.object(strat, "ensure_buildkit", return_value=_ok_step("ensure buildkit")),
+        patch.object(strat, "patch_once", return_value=_ok_step()),
+    ):
+        out = strat.remediate(_copa_ctx(), "img:latest")
+    assert out["status"] == "exhausted"
+    assert out["iterations"] == 3
+
+
+def test_loop_error_when_patch_fails():
+    """A failed copa patch step → error status."""
+    strat = _copa_strat()
+    dirty = CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary="")
+    bad_patch = StepResult(
+        step_num=0,
+        action="copa patch",
+        command="x",
+        exit_code=1,
+        status="failed",
+        started_at=_now(),
+        finished_at=_now(),
+    )
+    with (
+        patch.object(strat, "_executor", return_value=MagicMock()),
+        patch.object(strat, "_scan_to_report", return_value=dirty),
+        patch.object(strat, "ensure_buildkit", return_value=_ok_step("ensure buildkit")),
+        patch.object(strat, "patch_once", return_value=bad_patch),
+    ):
+        out = strat.remediate(_copa_ctx(), "img:latest")
+    assert out["status"] == "error"
+
+
+def test_copa_strategy_uses_own_trace_label():
+    """Isolation: copa path emits under 'image-hardening', not 'sub-agent-4'."""
+    captured = []
+    strat = CopaPatchStrategy(
+        config=HardeningConfig(build_instance_id="i-x"),
+        emit_fn=lambda run_id, agent, et, msg, *a, **k: captured.append(agent),
+    )
+    strat._emit(_copa_ctx(), "MESSAGE", "hi")
+    assert captured == ["image-hardening"]
+
+
+def _copa_ctx() -> HardenContext:
+    return HardenContext(
+        hardening_run_id=99,
+        source_image_ref="img:latest",
+        target_registry="486655355038.dkr.ecr.us-east-1.amazonaws.com/sisyfix-hardened-base-test",
+        published_tag="v0.0.9-copa",
+        build_instance_id="i-test",
+        aws_region="us-east-1",
+    )

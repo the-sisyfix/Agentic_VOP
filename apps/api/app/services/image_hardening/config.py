@@ -46,6 +46,20 @@ class HardeningConfig:
     # Scan gate severities that FAIL the run.
     scan_gate_severities: str = "CRITICAL,HIGH"
 
+    # --- Copa (in-place patch) path ---
+    # BuildKit endpoint copa connects to. Copa needs a running buildkitd; the
+    # strategy starts a moby/buildkit container on the box and talks to it over
+    # this TCP address. Honest note: copa patches OS packages only — app/lang
+    # deps (pip/npm/go) need the rebuild path.
+    buildkit_addr: str = "tcp://0.0.0.0:8888"
+    buildkit_image: str = "moby/buildkit:v0.12.5"
+    # Max remediation loop iterations before giving up (scan→patch→re-scan).
+    max_remediation_iterations: int = 3
+    # Scratch dir on the box for trivy JSON reports. Kept under the already
+    # allowed /opt/image-forge-src/ prefix so safety's working-directory
+    # allowlist permits commands here without any further change.
+    copa_scratch_dir: str = "/opt/image-forge-src/.copa-scratch"
+
     # Whole-run timeout (seconds). Image builds + scans are slower than a
     # typical fix, so this is generous.
     run_timeout_s: int = 1800
