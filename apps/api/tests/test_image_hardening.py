@@ -545,70 +545,359 @@ def test_run_hardening_mode_rebuild_routes_to_rebuild(monkeypatch):
     assert called["copa"] is False
 
 
-def test_copa_lifecycle_clean_publishes_success(monkeypatch):
-    """clean loop + successful publish → success outcome with digest."""
+# --- decide-from-findings lifecycle (full-scope gate) edge cases ---
+from app.services.image_hardening.scanning import ScanClassification  # noqa: E402
+
+
+def _publish_sets_digest(_copa, c, _ref, _cfg):
+    c.published_digest = "sha256:deadbeef"
+    return [_ok_step("push patched")]
+
+
+def _copa_fixture(monkeypatch, *, scans, remediate_result=None, dockerfile=None):
+    """Build a CopaPatchStrategy with pre_flight ready, full_scope_scan returning
+    the given sequence of ScanClassification, and (optionally) a remediate result.
+    Returns (copa, ctx)."""
     cfg = HardeningConfig(build_instance_id="i-test", sbom_bucket="b")
     copa = CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
     ctx = _copa_ctx()
-
+    if dockerfile is not None:
+        ctx.dockerfile_path = dockerfile
     monkeypatch.setattr(copa, "pre_flight_check", lambda _c: _pf_ready())
-    monkeypatch.setattr(
-        copa,
-        "remediate",
-        lambda _c, _ref: {
+    monkeypatch.setattr(copa, "full_scope_scan", _seq(scans))
+    if remediate_result is not None:
+        monkeypatch.setattr(copa, "remediate", lambda _c, _ref: remediate_result)
+    monkeypatch.setattr(orch, "_copa_publish", _publish_sets_digest)
+    return copa, ctx, cfg
+
+
+def _seq(items):
+    """Return a function that yields successive items on each call."""
+    it = iter(items)
+    return lambda *_a, **_k: next(it)
+
+
+def _clean():
+    return ScanClassification()
+
+
+def _os_only(n=1):
+    return ScanClassification(os_critical=n)
+
+
+def _dep_only(n=1):
+    return ScanClassification(dep_critical=n)
+
+
+def test_lifecycle_already_clean_at_intake_publishes(monkeypatch):
+    """0 fixable at intake → success, no copa/rebuild, publish original."""
+    copa, ctx, cfg = _copa_fixture(monkeypatch, scans=[_clean()])
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+    assert out.validation_results[0].passed is True
+
+
+def test_lifecycle_os_only_runs_copa_then_clean(monkeypatch):
+    """OS findings → copa → re-gate clean → success."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[_os_only(), _clean()],  # intake dirty, after copa clean
+        remediate_result={
             "status": "clean",
             "iterations": 1,
-            "final_image_ref": f"{ctx.target_registry}:{ctx.published_tag}-copa1",
+            "final_image_ref": "img:patched",
             "steps": [],
-            "final_scan": _clean_scan(),
-            "message": "clean",
+            "final_scan": None,
+            "message": "",
         },
     )
-
-    # Stub the publish tail to set a digest and report success.
-    def fake_publish(_copa, c, _ref, _cfg):
-        c.published_digest = "sha256:deadbeef"
-        return [_ok_step("push patched")]
-
-    monkeypatch.setattr(orch, "_copa_publish", fake_publish)
-
-    outcome = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
-    assert outcome.status == "success"
-    assert outcome.published_digest == "sha256:deadbeef"
-    assert outcome.validation_results[0].passed is True
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+    assert out.published_digest == "sha256:deadbeef"
 
 
-def test_copa_lifecycle_unfixable_fails_no_publish(monkeypatch):
-    """unfixable loop → failed outcome, publish NOT attempted."""
-    cfg = HardeningConfig(build_instance_id="i-test")
-    copa = CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
-    ctx = _copa_ctx()
-    published = {"called": False}
+def test_lifecycle_dependency_only_no_dockerfile_is_residual_fail(monkeypatch):
+    """THE Q2 CASE: dependency-only CVEs, no Dockerfile → NOT a false pass.
+    copa no-ops (os_fixable=0), deps remain, no source → failed/residual."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[_dep_only(), _dep_only()],  # intake has deps; after (no copa) still deps
+        dockerfile=None,
+    )
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "failed"
+    assert out.validation_results[0].passed is False
+    assert "residual" in out.scan_summary
 
-    monkeypatch.setattr(copa, "pre_flight_check", lambda _c: _pf_ready())
+
+def test_lifecycle_dependency_with_dockerfile_runs_rebuild(monkeypatch):
+    """dependency CVEs + Dockerfile → rebuild leg runs → clean → success."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[_dep_only(), _clean()],  # intake deps; after rebuild clean
+        dockerfile="/opt/image-forge-src/Dockerfile",
+    )
     monkeypatch.setattr(
-        copa,
-        "remediate",
-        lambda _c, _ref: {
-            "status": "unfixable",
+        orch,
+        "_run_rebuild_leg",
+        lambda *a, **k: ([_ok_step("docker build (rebuild)")], "img:rebuilt"),
+    )
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+
+
+def test_lifecycle_mixed_os_and_dep_with_dockerfile(monkeypatch):
+    """mixed: copa (OS) then rebuild (deps) → clean → success."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[
+            ScanClassification(os_critical=1, dep_critical=1),  # intake mixed
+            ScanClassification(dep_critical=1),  # after copa: OS gone, dep remains
+            _clean(),  # after rebuild: clean
+        ],
+        remediate_result={
+            "status": "clean",
             "iterations": 1,
-            "final_image_ref": _ref,
+            "final_image_ref": "img:patched",
             "steps": [],
-            "final_scan": CopaScanResult(fixable_critical=1, fixable_high=0, raw_summary=""),
-            "message": "needs rebuild leg",
+            "final_scan": None,
+            "message": "",
         },
+        dockerfile="/opt/image-forge-src/Dockerfile",
     )
     monkeypatch.setattr(
-        orch, "_copa_publish", lambda *a, **k: published.__setitem__("called", True) or []
+        orch,
+        "_run_rebuild_leg",
+        lambda *a, **k: ([_ok_step("docker build (rebuild)")], "img:rebuilt"),
     )
-
-    outcome = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
-    assert outcome.status == "failed"
-    assert published["called"] is False
-    assert outcome.validation_results[0].passed is False
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
 
 
 def _pf_ready():
     from app.services.image_hardening.models import PreFlightResult
 
     return PreFlightResult(ready=True)
+
+
+# ===========================================================================
+# scanning.classify_trivy_report — full-scope gate classification
+# ===========================================================================
+from app.services.image_hardening.scanning import classify_trivy_report  # noqa: E402
+
+
+def test_classify_splits_os_and_lang_fixable():
+    report = json.dumps(
+        {
+            "Results": [
+                {
+                    "Class": "os-pkgs",
+                    "Vulnerabilities": [
+                        {"Severity": "CRITICAL", "FixedVersion": "1.0"},
+                        {"Severity": "HIGH", "FixedVersion": "2.0"},
+                    ],
+                },
+                {
+                    "Class": "lang-pkgs",
+                    "Vulnerabilities": [
+                        {"Severity": "HIGH", "FixedVersion": "3.0"},
+                        {"Severity": "HIGH", "FixedVersion": None},  # unfixable → excluded
+                        {"Severity": "MEDIUM", "FixedVersion": "4.0"},  # not gated
+                    ],
+                },
+            ]
+        }
+    )
+    c = classify_trivy_report(report)
+    assert c.os_critical == 1
+    assert c.os_high == 1
+    assert c.dep_critical == 0
+    assert c.dep_high == 1
+    assert c.os_fixable == 2
+    assert c.dep_fixable == 1
+    assert c.gate_passes is False
+
+
+def test_classify_only_unfixable_gate_passes():
+    """Only unfixable findings → gate PASSES (policy-zero = zero *fixable*)."""
+    report = json.dumps(
+        {
+            "Results": [
+                {
+                    "Class": "os-pkgs",
+                    "Vulnerabilities": [{"Severity": "CRITICAL", "FixedVersion": None}],
+                }
+            ]
+        }
+    )
+    c = classify_trivy_report(report)
+    assert c.total_fixable == 0
+    assert c.gate_passes is True
+
+
+def test_classify_unknown_class_treated_as_dependency():
+    """Missing/unknown Class → conservatively counted as dependency (not dropped)."""
+    report = json.dumps(
+        {"Results": [{"Vulnerabilities": [{"Severity": "CRITICAL", "FixedVersion": "1.0"}]}]}
+    )
+    c = classify_trivy_report(report)
+    assert c.dep_critical == 1
+    assert c.os_fixable == 0
+    assert c.gate_passes is False
+
+
+def test_classify_empty_and_malformed():
+    assert classify_trivy_report("{}").gate_passes is True
+    assert classify_trivy_report("not json").gate_passes is True
+    assert classify_trivy_report('{"Results": null}').gate_passes is True
+
+
+# ===========================================================================
+# dep_bump — deterministic pip version bumping (rebuild Option b)
+# ===========================================================================
+from app.services.image_hardening.dep_bump import (  # noqa: E402
+    apply_pip_bumps,
+    compute_pip_bumps,
+    normalize_pkg,
+)
+
+
+def _lang_report(vulns, rtype="pip"):
+    return json.dumps(
+        {"Results": [{"Class": "lang-pkgs", "Type": rtype, "Vulnerabilities": vulns}]}
+    )
+
+
+def test_normalize_pkg_pep503():
+    assert normalize_pkg("Flask") == "flask"
+    assert normalize_pkg("foo_bar") == "foo-bar"
+    assert normalize_pkg("Foo.Bar") == "foo-bar"
+
+
+def test_compute_bumps_pins_declared_pip_package():
+    report = _lang_report(
+        [
+            {
+                "PkgName": "flask",
+                "Severity": "HIGH",
+                "FixedVersion": "2.3.2",
+                "VulnerabilityID": "CVE-x",
+            }
+        ]
+    )
+    plan = compute_pip_bumps(report, "flask==2.0.0\nrequests==2.28.0\n")
+    assert plan.to_pin == {"flask": "2.3.2"}
+    assert plan.residual == []
+
+
+def test_compute_bumps_transitive_is_residual():
+    """Package not declared in requirements.txt → residual, not pinned."""
+    report = _lang_report(
+        [
+            {
+                "PkgName": "urllib3",
+                "Severity": "CRITICAL",
+                "FixedVersion": "2.0.7",
+                "VulnerabilityID": "CVE-y",
+            }
+        ]
+    )
+    plan = compute_pip_bumps(report, "requests==2.28.0\n")  # urllib3 not declared
+    assert plan.to_pin == {}
+    assert len(plan.residual) == 1
+    assert "transitive" in plan.residual[0]["reason"]
+
+
+def test_compute_bumps_non_pip_is_residual():
+    report = _lang_report(
+        [
+            {
+                "PkgName": "lodash",
+                "Severity": "HIGH",
+                "FixedVersion": "4.17.21",
+                "VulnerabilityID": "CVE-z",
+            }
+        ],
+        rtype="npm",
+    )
+    plan = compute_pip_bumps(report, "flask==2.0.0\n")
+    assert plan.to_pin == {}
+    assert "non-pip" in plan.residual[0]["reason"]
+
+
+def test_compute_bumps_no_fixed_version_is_residual():
+    report = _lang_report(
+        [{"PkgName": "flask", "Severity": "HIGH", "FixedVersion": "", "VulnerabilityID": "CVE-n"}]
+    )
+    plan = compute_pip_bumps(report, "flask==2.0.0\n")
+    assert plan.to_pin == {}
+    assert "no fixed version" in plan.residual[0]["reason"]
+
+
+def test_compute_bumps_highest_version_when_multiple():
+    report = _lang_report(
+        [
+            {
+                "PkgName": "flask",
+                "Severity": "HIGH",
+                "FixedVersion": "2.3.2",
+                "VulnerabilityID": "a",
+            },
+            {
+                "PkgName": "flask",
+                "Severity": "CRITICAL",
+                "FixedVersion": "2.3.10",
+                "VulnerabilityID": "b",
+            },
+        ]
+    )
+    plan = compute_pip_bumps(report, "flask==2.0.0\n")
+    assert plan.to_pin == {"flask": "2.3.10"}
+
+
+def test_apply_bumps_rewrites_only_targeted_lines():
+    req = "# app deps\nFlask==2.0.0\nrequests>=2.28.0\n-r other.txt\n"
+    plan = compute_pip_bumps(
+        _lang_report(
+            [
+                {
+                    "PkgName": "flask",
+                    "Severity": "HIGH",
+                    "FixedVersion": "2.3.2",
+                    "VulnerabilityID": "c",
+                }
+            ]
+        ),
+        req,
+    )
+    out = apply_pip_bumps(req, plan)
+    assert "Flask==2.3.2" in out  # pinned (original casing preserved)
+    assert "requests>=2.28.0" in out  # untouched
+    assert "# app deps" in out  # comment preserved
+    assert "-r other.txt" in out  # directive preserved
+
+
+def test_apply_bumps_handles_unpinned_and_specifier_variants():
+    req = "flask\nnumpy~=1.24\n"
+    plan = compute_pip_bumps(
+        _lang_report(
+            [
+                {
+                    "PkgName": "flask",
+                    "Severity": "HIGH",
+                    "FixedVersion": "2.3.2",
+                    "VulnerabilityID": "d",
+                }
+            ]
+        ),
+        req,
+    )
+    out = apply_pip_bumps(req, plan)
+    assert "flask==2.3.2" in out
+    assert "numpy~=1.24" in out  # untouched
+
+
+def test_apply_bumps_noop_when_no_changes():
+    req = "flask==2.0.0\n"
+    plan = compute_pip_bumps(_lang_report([]), req)
+    assert apply_pip_bumps(req, plan) == req

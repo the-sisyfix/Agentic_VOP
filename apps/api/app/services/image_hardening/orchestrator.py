@@ -15,12 +15,14 @@ is never blocked by, a vulnerability-fix run (isolation guarantee #5).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from app.config import settings
 
 from .config import HardeningConfig, load_hardening_config, resolve_build_instance
+from .dep_bump import apply_pip_bumps, compute_pip_bumps
 from .models import HardenContext, HardeningOutcome, utcnow
 from .persistence import (
     any_concurrent_run_on_instance,
@@ -104,6 +106,7 @@ def run_hardening(
     auto_sign: bool,
     sb: Any,
     mode: str = MODE_PATCH,
+    dockerfile_path: str | None = None,
     config: HardeningConfig | None = None,
 ) -> int:
     """Run the pipeline for an ALREADY-CREATED hardening_runs row.
@@ -143,6 +146,7 @@ def run_hardening(
         aws_region=cfg.aws_region,
         sbom_bucket=cfg.sbom_bucket or None,
         auto_sign=auto_sign,
+        dockerfile_path=dockerfile_path,
     )
     started_at = utcnow()
 
@@ -281,10 +285,21 @@ def _run_copa_lifecycle(
     """Copa in-place patch lifecycle (image-ref path).
 
     preflight → remediation loop (scan→patch→re-scan) → gate →
-    (on clean) publish the patched image at the client's tag + SBOM.
+    decide-from-findings: one FULL-SCOPE scan is the source of truth for the
+    policy-zero gate AND the routing. OS findings → copa; dependency findings →
+    rebuild leg (if a Dockerfile is available) else reported as residual.
 
-    Residual DEPENDENCY/app CVEs that copa cannot fix are reported honestly in
-    scan_summary (they need the rebuild leg — next increment).
+    Edge cases handled explicitly:
+      - 0 fixable (OS+dep) at intake            → clean, publish original.
+      - OS-only                                 → copa → re-gate.
+      - dependency-only (NO OS)                 → copa no-ops; rebuild if
+                                                   Dockerfile, else residual
+                                                   (NOT a false pass — the gate
+                                                   is full-scope).
+      - mixed OS + dependency                   → copa then rebuild.
+      - residual deps, no Dockerfile            → failed (needs source).
+      - only UNfixable findings (no fix avail)  → gate passes (policy-zero is
+                                                   zero *fixable*), publish.
     """
     try:
         set_status(sb, run_id, "preflight")
@@ -294,76 +309,85 @@ def _run_copa_lifecycle(
                 status="failed", error_message=pf.blocking_reason or "pre-flight failed"
             )
 
+        steps: list = []
         set_status(sb, run_id, "scanning")
-        result = copa.remediate(ctx, ctx.source_image_ref)
-        steps = result["steps"]
-        final_scan = result["final_scan"]
-        gate = copa.build_gate_validation(final_scan)
 
-        # Loop error → failed, no publish.
-        if result["status"] == "error":
-            return HardeningOutcome(
-                status="failed",
-                step_results=steps,
-                validation_results=[gate],
-                scan_summary={"copa_loop": result["status"], "detail": result["message"]},
-                error_message=result["message"],
+        # --- 1. Full-scope intake scan = source of truth for gate + routing ---
+        intake = copa.full_scope_scan(ctx, ctx.source_image_ref)
+        log.info(
+            "hardening_run #%s intake: os_fixable=%d dep_fixable=%d",
+            run_id,
+            intake.os_fixable,
+            intake.dep_fixable,
+        )
+        current_ref = ctx.source_image_ref
+
+        # --- 2. Already policy-zero (incl. only-unfixable case) → publish ---
+        if intake.gate_passes:
+            return _finalize_clean(
+                sb, run_id, copa, ctx, cfg, current_ref, steps, intake, iterations=0
             )
 
-        # Not clean (unfixable / exhausted) → gate fails, no publish.
-        # scan_summary records WHY, incl. the honest "needs rebuild leg" note.
-        if result["status"] != "clean":
-            return HardeningOutcome(
-                status="failed",
-                step_results=steps,
-                validation_results=[gate],
-                scan_summary={
-                    "copa_loop": result["status"],
-                    "detail": result["message"],
-                    "note": "residual findings may be dependency/app-level — "
-                    "needs the rebuild leg (next increment) or are unfixable",
-                },
-                error_message=result["message"],
-            )
-
-        # Clean → publish the patched image at the client's intended tag.
-        set_status(sb, run_id, "publishing")
-        publish_steps = _copa_publish(copa, ctx, result["final_image_ref"], cfg)
-        steps.extend(publish_steps)
-        if any(s.status == "failed" for s in publish_steps):
-            return HardeningOutcome(
-                status="failed",
-                step_results=steps,
-                validation_results=[gate],
-                scan_summary={"copa_loop": "clean", "publish": "failed"},
-                error_message="patched image publish failed",
-            )
-
-        if ctx.published_digest:
-            try:
-                set_published(
-                    sb,
-                    run_id,
-                    published_digest=ctx.published_digest,
-                    published_tag=ctx.published_tag,
+        # --- 3. OS findings → copa patch loop ---
+        if intake.os_fixable > 0:
+            set_status(sb, run_id, "building")
+            result = copa.remediate(ctx, current_ref)
+            steps.extend(result["steps"])
+            if result["status"] == "error":
+                return HardeningOutcome(
+                    status="failed",
+                    step_results=steps,
+                    scan_summary={"stage": "copa", "detail": result["message"]},
+                    error_message=result["message"],
                 )
-            except Exception:  # noqa: BLE001, S110
-                pass
-        sbom_key = f"sboms/{ctx.published_digest}.spdx.json" if ctx.published_digest else None
-        if sbom_key:
-            try:
-                set_sbom_key(sb, run_id, sbom_key)
-            except Exception:  # noqa: BLE001, S110
-                pass
+            current_ref = result["final_image_ref"]
 
-        return HardeningOutcome(
-            status="success",
-            step_results=steps,
-            validation_results=[gate],
-            published_digest=ctx.published_digest,
-            published_tag=ctx.published_tag,
-            sbom_s3_key=sbom_key,
-            scan_summary={"copa_loop": "clean", "iterations": result["iterations"]},
+        # --- 4. Re-gate full scope after copa ---
+        after_copa = copa.full_scope_scan(ctx, current_ref)
+
+        # --- 5. Dependency findings remain → rebuild leg (if Dockerfile) ---
+        if after_copa.dep_fixable > 0:
+            if ctx.dockerfile_path:
+                set_status(sb, run_id, "building")
+                rebuild_steps, current_ref = _run_rebuild_leg(copa, ctx, cfg, current_ref)
+                steps.extend(rebuild_steps)
+                if any(s.status == "failed" for s in rebuild_steps):
+                    return HardeningOutcome(
+                        status="failed",
+                        step_results=steps,
+                        scan_summary={"stage": "rebuild", "detail": "rebuild leg failed"},
+                        error_message="rebuild leg failed",
+                    )
+                after_rebuild = copa.full_scope_scan(ctx, current_ref)
+            else:
+                # No source to rebuild dependency fixes → honest residual.
+                gate = _gate_from(after_copa)
+                return HardeningOutcome(
+                    status="failed",
+                    step_results=steps,
+                    validation_results=[gate],
+                    scan_summary={
+                        **after_copa.summary(),
+                        "residual": "dependency CVEs remain; no Dockerfile "
+                        "provided to rebuild — provide source or accept residual",
+                    },
+                    error_message="dependency CVEs remain and no Dockerfile to rebuild",
+                )
+        else:
+            after_rebuild = after_copa
+
+        # --- 6. Final full-scope gate ---
+        if not after_rebuild.gate_passes:
+            return HardeningOutcome(
+                status="failed",
+                step_results=steps,
+                validation_results=[_gate_from(after_rebuild)],
+                scan_summary={**after_rebuild.summary(), "result": "gate not met"},
+                error_message="fixable critical/high remain after remediation",
+            )
+
+        return _finalize_clean(
+            sb, run_id, copa, ctx, cfg, current_ref, steps, after_rebuild, iterations=1
         )
     except Exception as e:  # noqa: BLE001
         log.exception("hardening_run #%s (copa) crashed", run_id)
@@ -371,6 +395,234 @@ def _run_copa_lifecycle(
             status="failed",
             error_message=f"orchestrator crashed: {type(e).__name__}: {str(e)[:400]}",
         )
+
+
+def _gate_from(scan) -> Any:
+    """Build the policy-zero gate ValidationResult from a full-scope scan."""
+    from .models import ValidationResult  # noqa: PLC0415
+
+    return ValidationResult(
+        test_name="policy-zero gate (fixable CRITICAL,HIGH, full scope)",
+        method="cli",
+        command="trivy image --vuln-type os,library --ignore-unfixed --severity CRITICAL,HIGH",
+        expected="0 fixable CRITICAL/HIGH (OS + dependencies)",
+        actual=(f"os_fixable={scan.os_fixable}, dep_fixable={scan.dep_fixable}"),
+        passed=scan.gate_passes,
+        is_rescan=True,
+    )
+
+
+def _finalize_clean(sb, run_id, copa, ctx, cfg, final_ref, steps, scan, *, iterations) -> Any:
+    """Publish the clean image at the client's tag + SBOM; return success."""
+    set_status(sb, run_id, "publishing")
+    publish_steps = _copa_publish(copa, ctx, final_ref, cfg)
+    steps.extend(publish_steps)
+    gate = _gate_from(scan)
+    if any(s.status == "failed" for s in publish_steps):
+        return HardeningOutcome(
+            status="failed",
+            step_results=steps,
+            validation_results=[gate],
+            scan_summary={**scan.summary(), "publish": "failed"},
+            error_message="publish failed",
+        )
+    if ctx.published_digest:
+        try:
+            set_published(
+                sb, run_id, published_digest=ctx.published_digest, published_tag=ctx.published_tag
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+    sbom_key = f"sboms/{ctx.published_digest}.spdx.json" if ctx.published_digest else None
+    if sbom_key:
+        try:
+            set_sbom_key(sb, run_id, sbom_key)
+        except Exception:  # noqa: BLE001, S110
+            pass
+    return HardeningOutcome(
+        status="success",
+        step_results=steps,
+        validation_results=[gate],
+        published_digest=ctx.published_digest,
+        published_tag=ctx.published_tag,
+        sbom_s3_key=sbom_key,
+        scan_summary={**scan.summary(), "iterations": iterations},
+    )
+
+
+def _run_rebuild_leg(copa, ctx, cfg, current_ref):
+    """Option (a) rebuild leg: rebuild from the client's Dockerfile.
+
+    MVP scope: rebuild from the provided Dockerfile (picks up newer base/deps if
+    the Dockerfile does not pin vulnerable versions). Deterministic
+    dependency-version bumping is the NEXT increment. Reuses copa's executor to
+    run docker build + push at the client's tag; the final gate re-scan decides
+    pass/fail honestly.
+    """
+    from .models import StepResult  # noqa: PLC0415
+
+    executor = copa._executor(ctx)  # noqa: SLF001 — same-package reuse
+    wd = ctx.build_directory or cfg.default_build_directory
+    final_ref = f"{ctx.target_registry}:{ctx.published_tag}"
+    steps: list = []
+
+    def step(num, action, command, timeout_s):
+        start = utcnow()
+        try:
+            r = copa._run(executor, command, workdir=wd, timeout_s=timeout_s)  # noqa: SLF001
+        except Exception as e:  # noqa: BLE001
+            steps.append(
+                StepResult(
+                    step_num=num,
+                    action=action,
+                    command=command,
+                    stderr=f"{type(e).__name__}: {e}",
+                    exit_code=1,
+                    status="failed",
+                    started_at=start,
+                    finished_at=utcnow(),
+                )
+            )
+            return False
+        steps.append(
+            StepResult(
+                step_num=num,
+                action=action,
+                command=command,
+                stdout=(r.stdout or "")[:2000],
+                stderr=(r.stderr or "")[:1000],
+                exit_code=r.exit_code,
+                duration_ms=r.duration_ms,
+                status="success" if r.exit_code == 0 else "failed",
+                started_at=start,
+                finished_at=utcnow(),
+                ssm_command_id=r.ssm_command_id,
+            )
+        )
+        return r.exit_code == 0
+
+    # --- Option b: deterministic pip dependency bump before rebuild ---
+    # 1. Full-scope scan of the CURRENT image to a report file we can read back.
+    scratch = cfg.copa_scratch_dir
+    report_path = f"{scratch}/trivy-deps-{ctx.hardening_run_id}.json"
+    req_path = f"{wd.rstrip('/')}/{cfg.requirements_filename}"
+
+    scan_cmd = (
+        f"trivy image --vuln-type library --ignore-unfixed -f json "
+        f"-o '{report_path}' {current_ref} && cat '{report_path}'"
+    )
+    start = utcnow()
+    report_json = "{}"
+    try:
+        r = copa._run(executor, scan_cmd, workdir=scratch, timeout_s=600)  # noqa: SLF001
+        report_json = r.stdout or "{}"
+        steps.append(
+            StepResult(
+                step_num=20,
+                action="scan deps (for bump)",
+                command=scan_cmd,
+                exit_code=r.exit_code,
+                status="success" if r.exit_code == 0 else "failed",
+                started_at=start,
+                finished_at=utcnow(),
+                ssm_command_id=r.ssm_command_id,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        steps.append(
+            StepResult(
+                step_num=20,
+                action="scan deps (for bump)",
+                command=scan_cmd,
+                stderr=f"{type(e).__name__}: {e}",
+                exit_code=1,
+                status="failed",
+                started_at=start,
+                finished_at=utcnow(),
+            )
+        )
+        return steps, current_ref
+
+    # 2. Read requirements.txt from the build context.
+    req_text = ""
+    cat_cmd = f"cat '{req_path}' 2>/dev/null || echo '__NO_REQUIREMENTS__'"
+    try:
+        r = copa._run(executor, cat_cmd, workdir=wd, timeout_s=60)  # noqa: SLF001
+        req_text = r.stdout or ""
+    except Exception:  # noqa: BLE001
+        req_text = "__NO_REQUIREMENTS__"
+
+    if "__NO_REQUIREMENTS__" in req_text:
+        # No manifest to bump — honest residual; still attempt a plain rebuild
+        # (Option a) so a floating-version Dockerfile can still pick up fixes.
+        steps.append(
+            StepResult(
+                step_num=21,
+                action="dep bump skipped",
+                command=f"read {req_path}",
+                stdout="requirements.txt not found — dependency pinning skipped (residual)",
+                exit_code=0,
+                status="skipped",
+                started_at=utcnow(),
+                finished_at=utcnow(),
+            )
+        )
+    else:
+        # 3. Compute the deterministic bump plan from trivy's fixed versions.
+        plan = compute_pip_bumps(report_json, req_text)
+        if plan.has_changes:
+            new_text = apply_pip_bumps(req_text, plan)
+            # 4. Write the bumped requirements.txt back (heredoc, safety-allowed dir).
+            pinned = ", ".join(f"{k}=={v}" for k, v in plan.to_pin.items())
+            write_cmd = f"cat > '{req_path}' <<'__REQ_EOF__'\n{new_text}\n__REQ_EOF__"
+            start = utcnow()
+            try:
+                r = copa._run(executor, write_cmd, workdir=wd, timeout_s=60)  # noqa: SLF001
+                steps.append(
+                    StepResult(
+                        step_num=21,
+                        action="pin pip deps",
+                        command=f"pin: {pinned}",
+                        stdout=(r.stdout or "")[:500],
+                        exit_code=r.exit_code,
+                        status="success" if r.exit_code == 0 else "failed",
+                        started_at=start,
+                        finished_at=utcnow(),
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                steps.append(
+                    StepResult(
+                        step_num=21,
+                        action="pin pip deps",
+                        command=f"pin: {pinned}",
+                        stderr=f"{type(e).__name__}: {e}",
+                        exit_code=1,
+                        status="failed",
+                        started_at=start,
+                        finished_at=utcnow(),
+                    )
+                )
+                return steps, current_ref
+        if plan.residual:
+            steps.append(
+                StepResult(
+                    step_num=22,
+                    action="dep residual (reported)",
+                    command="honest residual",
+                    stdout=json.dumps(plan.residual)[:1500],
+                    exit_code=0,
+                    status="skipped",
+                    started_at=utcnow(),
+                    finished_at=utcnow(),
+                )
+            )
+
+    # 5. Rebuild from the (possibly bumped) Dockerfile + context.
+    df = ctx.dockerfile_path
+    if not step(23, "docker build (rebuild)", f"docker build -f '{df}' -t {final_ref} '{wd}'", 900):
+        return steps, current_ref
+    return steps, final_ref
 
 
 def _copa_publish(

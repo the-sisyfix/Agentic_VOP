@@ -42,6 +42,7 @@ from .models import (
     ValidationResult,
     utcnow,
 )
+from .scanning import ScanClassification, classify_trivy_report
 
 _TRACE_AGENT = "image-hardening"
 
@@ -154,6 +155,24 @@ class CopaPatchStrategy:
                 elif sev == "HIGH":
                     high += 1
         return (crit, high)
+
+    def full_scope_scan(self, ctx: HardenContext, image_ref: str) -> ScanClassification:
+        """FULL-SCOPE scan (OS + language deps) → classified fixable crit/high.
+
+        This is the source of truth for the policy-zero GATE and for the
+        orchestrator's decision (copa for OS, rebuild for deps). Distinct from
+        the OS-only report copa consumes as its patch input.
+        """
+        executor = self._executor(ctx)
+        wd = self._scratch()
+        report_path = f"{wd}/trivy-full-{ctx.hardening_run_id}.json"
+        cmd = (
+            f"trivy image --vuln-type os,library --ignore-unfixed "
+            f"-f json -o '{report_path}' {image_ref} "
+            f"&& cat '{report_path}'"
+        )
+        r = self._run(executor, cmd, workdir=wd, timeout_s=600)
+        return classify_trivy_report(r.stdout or "{}")
 
     # ------------------------------------------------------------------ phases
     def pre_flight_check(self, ctx: HardenContext) -> PreFlightResult:

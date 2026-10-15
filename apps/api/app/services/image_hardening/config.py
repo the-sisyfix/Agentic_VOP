@@ -60,6 +60,10 @@ class HardeningConfig:
     # allowlist permits commands here without any further change.
     copa_scratch_dir: str = "/opt/image-forge-src/.copa-scratch"
 
+    # Dependency-bump (rebuild Option b): the requirements.txt filename within
+    # the build context to pin pip fixes into. Deterministic pip-only for now.
+    requirements_filename: str = "requirements.txt"
+
     # Whole-run timeout (seconds). Image builds + scans are slower than a
     # typical fix, so this is generous.
     run_timeout_s: int = 1800
