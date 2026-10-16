@@ -1,7 +1,7 @@
 # Intentionally pinned to vulnerable versions for Trivy FS scanning
 flask==1.0
 requests==2.19.0
-urllib3==1.24.1
+urllib3==2.8.0
 jinja2==2.10
 werkzeug==0.15.0
 pyyaml==5.1
