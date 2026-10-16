@@ -325,7 +325,7 @@ def _run_copa_lifecycle(
         # --- 2. Already policy-zero (incl. only-unfixable case) → publish ---
         if intake.gate_passes:
             return _finalize_clean(
-                sb, run_id, copa, ctx, cfg, current_ref, steps, intake, iterations=0
+                sb, run_id, copa, ctx, cfg, current_ref, steps, intake, iterations=0, intake=intake
             )
 
         # --- 3. OS findings → copa patch loop ---
@@ -337,7 +337,11 @@ def _run_copa_lifecycle(
                 return HardeningOutcome(
                     status="failed",
                     step_results=steps,
-                    scan_summary={"stage": "copa", "detail": result["message"]},
+                    scan_summary={
+                        **_intake_summary(intake),
+                        "stage": "copa",
+                        "detail": result["message"],
+                    },
                     error_message=result["message"],
                 )
             current_ref = result["final_image_ref"]
@@ -355,7 +359,11 @@ def _run_copa_lifecycle(
                     return HardeningOutcome(
                         status="failed",
                         step_results=steps,
-                        scan_summary={"stage": "rebuild", "detail": "rebuild leg failed"},
+                        scan_summary={
+                            **_intake_summary(intake),
+                            "stage": "rebuild",
+                            "detail": "rebuild leg failed",
+                        },
                         error_message="rebuild leg failed",
                     )
                 after_rebuild = copa.full_scope_scan(ctx, current_ref)
@@ -368,6 +376,7 @@ def _run_copa_lifecycle(
                     validation_results=[gate],
                     scan_summary={
                         **after_copa.summary(),
+                        **_intake_summary(intake),
                         "residual": "dependency CVEs remain; no Dockerfile "
                         "provided to rebuild — provide source or accept residual",
                     },
@@ -382,12 +391,25 @@ def _run_copa_lifecycle(
                 status="failed",
                 step_results=steps,
                 validation_results=[_gate_from(after_rebuild)],
-                scan_summary={**after_rebuild.summary(), "result": "gate not met"},
+                scan_summary={
+                    **after_rebuild.summary(),
+                    **_intake_summary(intake),
+                    "result": "gate not met",
+                },
                 error_message="fixable critical/high remain after remediation",
             )
 
         return _finalize_clean(
-            sb, run_id, copa, ctx, cfg, current_ref, steps, after_rebuild, iterations=1
+            sb,
+            run_id,
+            copa,
+            ctx,
+            cfg,
+            current_ref,
+            steps,
+            after_rebuild,
+            iterations=1,
+            intake=intake,
         )
     except Exception as e:  # noqa: BLE001
         log.exception("hardening_run #%s (copa) crashed", run_id)
@@ -395,6 +417,20 @@ def _run_copa_lifecycle(
             status="failed",
             error_message=f"orchestrator crashed: {type(e).__name__}: {str(e)[:400]}",
         )
+
+
+def _intake_summary(intake) -> dict:
+    """Intake (pre-remediation) fixable counts, for the auditable run record.
+
+    scan_summary otherwise reports only the FINAL (post-remediation) scan, so a
+    reader cannot tell "came in clean" from "came in with N and we fixed them".
+    These keys make the before/after provable from the run record itself.
+    """
+    return {
+        "intake_os_fixable": intake.os_fixable,
+        "intake_dep_fixable": intake.dep_fixable,
+        "intake_total_fixable": intake.total_fixable,
+    }
 
 
 def _gate_from(scan) -> Any:
@@ -412,8 +448,17 @@ def _gate_from(scan) -> Any:
     )
 
 
-def _finalize_clean(sb, run_id, copa, ctx, cfg, final_ref, steps, scan, *, iterations) -> Any:
-    """Publish the clean image at the client's tag + SBOM; return success."""
+def _finalize_clean(
+    sb, run_id, copa, ctx, cfg, final_ref, steps, scan, *, iterations, intake=None
+) -> Any:
+    """Publish the clean image at the client's tag + SBOM; return success.
+
+    `intake` (the pre-remediation full-scope scan) is recorded in scan_summary
+    so the run proves "came in with N fixable, went out with 0". Defaults to
+    `scan` when not supplied (the already-clean-at-intake path, where intake IS
+    the final scan).
+    """
+    intake_dict = _intake_summary(intake if intake is not None else scan)
     set_status(sb, run_id, "publishing")
     publish_steps = _copa_publish(copa, ctx, final_ref, cfg)
     steps.extend(publish_steps)
@@ -423,7 +468,7 @@ def _finalize_clean(sb, run_id, copa, ctx, cfg, final_ref, steps, scan, *, itera
             status="failed",
             step_results=steps,
             validation_results=[gate],
-            scan_summary={**scan.summary(), "publish": "failed"},
+            scan_summary={**scan.summary(), **intake_dict, "publish": "failed"},
             error_message="publish failed",
         )
     if ctx.published_digest:
@@ -446,7 +491,7 @@ def _finalize_clean(sb, run_id, copa, ctx, cfg, final_ref, steps, scan, *, itera
         published_digest=ctx.published_digest,
         published_tag=ctx.published_tag,
         sbom_s3_key=sbom_key,
-        scan_summary={**scan.summary(), "iterations": iterations},
+        scan_summary={**scan.summary(), **intake_dict, "iterations": iterations},
     )
 
 
@@ -686,15 +731,28 @@ def _copa_publish(
     )
     if not step(10, "ECR login", login, 120):
         return steps
-    if not step(11, "retag patched", f"docker tag {patched_ref} {final_ref}", 60):
+    # Ensure the image is present LOCALLY before retag — correct for BOTH paths:
+    #   - copa-patched path: `patched_ref` is a LOCAL-ONLY image copa built on
+    #     the box (never pushed anywhere). It is already present → inspect
+    #     succeeds, we must NOT `docker pull` it (pull would fail: no such repo).
+    #   - clean-at-intake path: `patched_ref` is the ORIGINAL source ref, which
+    #     trivy/copa only scanned remotely and was never pulled → inspect fails,
+    #     so we pull it.
+    # `inspect || pull` handles both without a false failure.
+    ensure_local = (
+        f"docker image inspect {patched_ref} >/dev/null 2>&1 || docker pull {patched_ref}"
+    )
+    if not step(11, "ensure image local", ensure_local, 600):
         return steps
-    if not step(12, "push patched", f"docker push {final_ref}", 600):
+    if not step(12, "retag patched", f"docker tag {patched_ref} {final_ref}", 60):
+        return steps
+    if not step(13, "push patched", f"docker push {final_ref}", 600):
         return steps
 
     digest_cmd = (
         f"docker inspect --format='{{{{index .RepoDigests 0}}}}' {final_ref} | cut -d'@' -f2"
     )
-    if step(13, "resolve digest", digest_cmd, 60):
+    if step(14, "resolve digest", digest_cmd, 60):
         out = (steps[-1].stdout or "").strip().splitlines()
         digest = out[-1] if out else ""
         if digest.startswith("sha256:"):
@@ -704,10 +762,10 @@ def _copa_publish(
         bucket = ctx.sbom_bucket or cfg.sbom_bucket
         key = f"sboms/{ctx.published_digest}.spdx.json"
         if step(
-            14, "generate SBOM", f"syft {final_ref} -o spdx-json=/tmp/harden-sbom.spdx.json", 300
+            15, "generate SBOM", f"syft {final_ref} -o spdx-json=/tmp/harden-sbom.spdx.json", 300
         ):
             step(
-                15, "upload SBOM", f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}", 120
+                16, "upload SBOM", f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}", 120
             )
 
     return steps

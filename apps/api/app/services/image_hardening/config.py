@@ -55,6 +55,13 @@ class HardeningConfig:
     buildkit_image: str = "moby/buildkit:v0.12.5"
     # Max remediation loop iterations before giving up (scan→patch→re-scan).
     max_remediation_iterations: int = 3
+    # Retries for a SINGLE copa patch invocation that fails with a TRANSIENT
+    # signature (apt mirror 404 / CDN flake / network fetch error). copa's
+    # internal `apt-get install <helper>` has no retry, so a single stale Debian
+    # mirror edge-node can abort an otherwise-fine patch. We retry the whole
+    # copa invocation (idempotent — it rebuilds) a few times with backoff.
+    copa_transient_retries: int = 2
+    copa_retry_backoff_s: float = 5.0
     # Scratch dir on the box for trivy JSON reports. Kept under the already
     # allowed /opt/image-forge-src/ prefix so safety's working-directory
     # allowlist permits commands here without any further change.

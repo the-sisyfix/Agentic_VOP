@@ -43,8 +43,13 @@ class HardeningTriggerRequest(BaseModel):
     source_image_ref: str = Field(..., min_length=1, max_length=512)
     # ECR repository URL to publish to (no tag).
     target_registry: str = Field(..., min_length=1, max_length=512)
-    # Tag to publish under (e.g. v0.1.0). IMMUTABLE repos need a fresh tag per run.
-    published_tag: str = Field(..., min_length=1, max_length=128)
+    # Tag to publish under (e.g. v0.1.0). Must be a valid Docker tag: starts
+    # with an alphanumeric or underscore, then alphanumerics / . _ - only
+    # (NO colons or slashes — those break the repo:tag reference). Fail fast
+    # here with a clear 422 instead of a cryptic `docker tag` error mid-run.
+    published_tag: str = Field(
+        ..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_][A-Za-z0-9._-]*$"
+    )
     # When true, auto-dispatch the signing workflow after a successful publish.
     auto_sign: bool = False
     # Remediation mode: "patch" = copa in-place OS patch (default, primary);

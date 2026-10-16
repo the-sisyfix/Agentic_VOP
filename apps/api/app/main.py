@@ -112,6 +112,36 @@ async def _start_fix_run_reaper() -> None:
     asyncio.create_task(_loop())
 
 
+@app.on_event("startup")
+async def _wire_hardening_logger() -> None:
+    """Surface image-hardening pipeline logs under uvicorn.
+
+    The orchestrator logs intake counts, run start/finish, etc. via
+    logging.getLogger("image_hardening"). Without a handler those INFO records
+    fall through to the root logger (default level WARNING) and never show in
+    the uvicorn console. We attach uvicorn's own handlers so hardening logs
+    appear alongside the rest, at INFO. Idempotent + fail-open: never breaks
+    startup, and does not alter any other logger's configuration.
+    """
+    import logging  # noqa: PLC0415
+
+    try:
+        uv = logging.getLogger("uvicorn")
+        target = logging.getLogger("image_hardening")
+        target.setLevel(logging.INFO)
+        # Reuse uvicorn's handlers so formatting/stream match the rest of the
+        # server output. Only attach if not already present (idempotent across
+        # the --reload worker restarts).
+        if uv.handlers:
+            existing = set(target.handlers)
+            for h in uv.handlers:
+                if h not in existing:
+                    target.addHandler(h)
+            target.propagate = False  # avoid double-logging via root
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Ensure unhandled 500s still carry CORS headers so the browser can read the error."""

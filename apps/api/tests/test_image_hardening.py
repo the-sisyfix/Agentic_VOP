@@ -20,6 +20,8 @@ import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.agents.fixer import safety
 from app.agents.fixer.models import CommandResult
 from app.services.image_hardening.config import HardeningConfig
@@ -274,31 +276,55 @@ def _copa_strat() -> CopaPatchStrategy:
     return CopaPatchStrategy(config=cfg, emit_fn=lambda *a, **k: None)
 
 
-# ---- trivy report parsing ----
-def test_count_fixable_parses_critical_high_with_fixedversion():
-    report = json.dumps(
-        {
-            "Results": [
-                {
-                    "Vulnerabilities": [
-                        {"Severity": "CRITICAL", "FixedVersion": "1.2.3"},
-                        {"Severity": "HIGH", "FixedVersion": "4.5.6"},
-                        {"Severity": "HIGH", "FixedVersion": None},  # not fixable → excluded
-                        {"Severity": "MEDIUM", "FixedVersion": "7.8.9"},  # not gated
-                    ]
-                }
-            ]
-        }
+# ---- box-side scan summary parsing ----
+# Counting now happens ON THE BOX (box_count_command) to avoid SSM's ~24 KB
+# stdout truncation of multi-MB trivy reports. parse_box_summary consumes the
+# tiny marker-prefixed JSON the box prints, and HARD-FAILS on any failure so an
+# unscanned image can never silently pass the gate.
+def test_box_count_command_embeds_report_path_and_marker():
+    from app.services.image_hardening.scanning import box_count_command
+
+    cmd = box_count_command("/scratch/report.json")
+    assert "/scratch/report.json" in cmd
+    assert "python3" in cmd
+    assert "__HARDEN_SCAN_SUMMARY__" in cmd
+
+
+def test_parse_box_summary_reads_counts():
+    from app.services.image_hardening.scanning import parse_box_summary
+
+    out = (
+        "some trivy banner line\n"
+        '__HARDEN_SCAN_SUMMARY__ {"ok": true, "os_critical": 2, "os_high": 3, '
+        '"dep_critical": 1, "dep_high": 0}\n'
     )
-    crit, high = CopaPatchStrategy._count_fixable(report)
-    assert crit == 1
-    assert high == 1  # the no-FixedVersion HIGH is excluded
+    c = parse_box_summary(out)
+    assert c.os_critical == 2
+    assert c.os_high == 3
+    assert c.dep_critical == 1
+    assert c.dep_high == 0
+    assert c.total_fixable == 6
 
 
-def test_count_fixable_handles_empty_or_malformed():
-    assert CopaPatchStrategy._count_fixable("{}") == (0, 0)
-    assert CopaPatchStrategy._count_fixable("not json") == (0, 0)
-    assert CopaPatchStrategy._count_fixable('{"Results": null}') == (0, 0)
+def test_parse_box_summary_hard_fails_on_missing_marker():
+    from app.services.image_hardening.scanning import ScanParseError, parse_box_summary
+
+    with pytest.raises(ScanParseError):
+        parse_box_summary("trivy ran but no summary was printed (truncated?)")
+
+
+def test_parse_box_summary_hard_fails_on_empty():
+    from app.services.image_hardening.scanning import ScanParseError, parse_box_summary
+
+    with pytest.raises(ScanParseError):
+        parse_box_summary("")
+
+
+def test_parse_box_summary_hard_fails_when_box_reports_not_ok():
+    from app.services.image_hardening.scanning import ScanParseError, parse_box_summary
+
+    with pytest.raises(ScanParseError):
+        parse_box_summary('__HARDEN_SCAN_SUMMARY__ {"ok": false, "error": "no such file"}')
 
 
 def test_scan_result_gate_property():
@@ -324,6 +350,137 @@ def test_gate_validation_pass_fail():
     assert strat.build_gate_validation(clean).is_rescan is True
     assert strat.build_gate_validation(dirty).passed is False
     assert strat.build_gate_validation(None).passed is False
+
+
+# ---- copa -t is a PLAIN tag; patched image is <repo-of-source>:<tag> ----
+# copa patch -i <ref> -t <TAG> produces a LOCAL image at <repo-of-ref>:<TAG>.
+# -t must NOT be a full registry/repo:tag or copa errors "invalid tag format".
+def test_repo_of_strips_tag_and_digest():
+    from app.services.image_hardening.copa_strategy import _repo_of
+
+    assert _repo_of("debian:11.0") == "debian"
+    assert _repo_of("nginx") == "nginx"
+    assert _repo_of("registry.io/foo/bar:tag") == "registry.io/foo/bar"
+    # Registry port must not be mistaken for a tag.
+    assert _repo_of("registry.io:5000/foo/bar:tag") == "registry.io:5000/foo/bar"
+    # Digests stripped (with and without registry).
+    assert _repo_of("foo@sha256:abc123") == "foo"
+    assert _repo_of("registry.io/foo@sha256:abc123") == "registry.io/foo"
+
+
+def test_copa_local_patched_ref():
+    from app.services.image_hardening.copa_strategy import copa_local_patched_ref
+
+    assert copa_local_patched_ref("debian:11.0", "v1-copa1") == "debian:v1-copa1"
+    # Re-iteration: patching the local patched ref again keeps the repo.
+    assert copa_local_patched_ref("debian:v1-copa1", "v1-copa2") == "debian:v1-copa2"
+    assert copa_local_patched_ref("registry.io:5000/a/b:tag", "x") == "registry.io:5000/a/b:x"
+
+
+# ---- transient copa failure detection + retry (apt mirror / CDN 404 flake) ----
+def _failed_step(stderr):
+    return StepResult(
+        step_num=1,
+        action="copa patch",
+        command="copa patch ...",
+        stderr=stderr,
+        exit_code=1,
+        status="failed",
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )
+
+
+def test_capture_hoists_error_line_buried_under_progress_noise():
+    """The real error (404) must survive even when far from the tail (run #9 gap)."""
+    from app.services.image_hardening.copa_strategy import _capture
+
+    err_line = "#6 1.240   404  Not Found [IP: 146.75.38.132 80]"
+    # Error line early, then a huge wall of trailing progress lines that would
+    # push it out of a plain char-tail.
+    noise = "\n".join(f"#99 {i} progress line pulling bytes" for i in range(400))
+    blob = f"#6 apt-get install busybox-static\n{err_line}\n{noise}"
+    out = _capture(blob, 1000)
+    assert "404  Not Found" in out  # hoisted, not lost
+    assert "error signals" in out
+
+
+def test_capture_handles_empty_and_short():
+    from app.services.image_hardening.copa_strategy import _capture
+
+    assert _capture("", 100) == ""
+    assert _capture(None, 100) == ""
+    # Short clean text with no error signal is returned as-is.
+    assert _capture("all good\ndone", 100) == "all good\ndone"
+
+
+def test_transient_detector_matches_apt_404():
+    from app.services.image_hardening.copa_strategy import _is_transient_copa_failure
+
+    s = _failed_step(
+        "Err:1 http://deb.debian.org/debian-security bullseye-security/main arm64 "
+        "busybox-static arm64 1:1.30.1-6+deb11u1\n  404  Not Found [IP: 146.75.38.132 80]\n"
+        'Error: process "apt-get install busybox-static" did not complete successfully'
+    )
+    assert _is_transient_copa_failure(s) is True
+
+
+def test_transient_detector_rejects_deterministic_failure():
+    from app.services.image_hardening.copa_strategy import _is_transient_copa_failure
+
+    assert _is_transient_copa_failure(_failed_step("Error: invalid report format")) is False
+    assert _is_transient_copa_failure(_failed_step("")) is False
+
+
+def test_patch_retry_recovers_after_transient_then_success(monkeypatch):
+    """First attempt 404s (transient) → retry → success. adaptation_note records it."""
+    strat = _copa_strat()
+    monkeypatch.setattr(
+        "app.services.image_hardening.copa_strategy.time.sleep", lambda *_a, **_k: None
+    )
+    transient = _failed_step("404  Not Found")
+    ok = StepResult(
+        step_num=1,
+        action="copa patch",
+        command="copa patch ...",
+        exit_code=0,
+        status="success",
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )
+    with patch.object(strat, "patch_once", side_effect=[transient, ok]):
+        out = strat.patch_once_with_retry(_copa_ctx(), "debian:11.0", "/r.json", "t1")
+    assert out.status == "success"
+    assert "attempt 2" in (out.adaptation_note or "")
+
+
+def test_patch_retry_fails_fast_on_deterministic(monkeypatch):
+    """A deterministic failure is NOT retried (patch_once called exactly once)."""
+    strat = _copa_strat()
+    monkeypatch.setattr(
+        "app.services.image_hardening.copa_strategy.time.sleep", lambda *_a, **_k: None
+    )
+    det = _failed_step("Error: unsupported image type")
+    mock = MagicMock(return_value=det)
+    with patch.object(strat, "patch_once", mock):
+        out = strat.patch_once_with_retry(_copa_ctx(), "debian:11.0", "/r.json", "t1")
+    assert out.status == "failed"
+    assert mock.call_count == 1  # no retry on deterministic failure
+
+
+def test_patch_retry_exhausts_on_persistent_transient(monkeypatch):
+    """Transient every time → exhaust retries, note records the persistence."""
+    strat = _copa_strat()
+    monkeypatch.setattr(
+        "app.services.image_hardening.copa_strategy.time.sleep", lambda *_a, **_k: None
+    )
+    mock = MagicMock(return_value=_failed_step("failed to fetch ... 404 Not Found"))
+    with patch.object(strat, "patch_once", mock):
+        out = strat.patch_once_with_retry(_copa_ctx(), "debian:11.0", "/r.json", "t1")
+    assert out.status == "failed"
+    # default copa_transient_retries=2 → 3 total attempts
+    assert mock.call_count == 3
+    assert "persisted" in (out.adaptation_note or "")
 
 
 # ---- remediation loop control flow (scan/patch methods mocked) ----
@@ -614,6 +771,18 @@ def test_lifecycle_os_only_runs_copa_then_clean(monkeypatch):
     out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
     assert out.status == "success"
     assert out.published_digest == "sha256:deadbeef"
+    # Intake counts persisted so the record proves "came in dirty, went out 0".
+    assert out.scan_summary["intake_os_fixable"] == 1
+    assert out.scan_summary["intake_total_fixable"] == 1
+    assert out.scan_summary["total_fixable"] == 0  # final (post-copa) is clean
+
+
+def test_lifecycle_already_clean_records_zero_intake(monkeypatch):
+    """Clean-at-intake success records intake_total_fixable=0 (provably clean)."""
+    copa, ctx, cfg = _copa_fixture(monkeypatch, scans=[_clean()])
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+    assert out.scan_summary["intake_total_fixable"] == 0
 
 
 def test_lifecycle_dependency_only_no_dockerfile_is_residual_fail(monkeypatch):
@@ -628,6 +797,9 @@ def test_lifecycle_dependency_only_no_dockerfile_is_residual_fail(monkeypatch):
     assert out.status == "failed"
     assert out.validation_results[0].passed is False
     assert "residual" in out.scan_summary
+    # Intake counts persisted even on a failure path (auditable).
+    assert out.scan_summary["intake_dep_fixable"] == 1
+    assert out.scan_summary["intake_total_fixable"] == 1
 
 
 def test_lifecycle_dependency_with_dockerfile_runs_rebuild(monkeypatch):
@@ -746,10 +918,23 @@ def test_classify_unknown_class_treated_as_dependency():
     assert c.gate_passes is False
 
 
-def test_classify_empty_and_malformed():
+def test_classify_empty_report_is_clean():
+    # A well-formed but empty report legitimately means "no findings" → clean.
     assert classify_trivy_report("{}").gate_passes is True
-    assert classify_trivy_report("not json").gate_passes is True
     assert classify_trivy_report('{"Results": null}').gate_passes is True
+
+
+def test_classify_malformed_hard_fails():
+    # Unparseable input must HARD-FAIL (never return a silent all-zero that
+    # would falsely PASS the gate on an unscanned image).
+    from app.services.image_hardening.scanning import ScanParseError
+
+    with pytest.raises(ScanParseError):
+        classify_trivy_report("not json")
+    with pytest.raises(ScanParseError):
+        classify_trivy_report("")
+    with pytest.raises(ScanParseError):
+        classify_trivy_report("[]")  # JSON array, not an object
 
 
 # ===========================================================================
