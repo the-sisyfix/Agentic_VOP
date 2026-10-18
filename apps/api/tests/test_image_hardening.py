@@ -327,6 +327,145 @@ def test_parse_box_summary_hard_fails_when_box_reports_not_ok():
         parse_box_summary('__HARDEN_SCAN_SUMMARY__ {"ok": false, "error": "no such file"}')
 
 
+# ---- residual extractor (box builds files, prints only counts) ----
+def test_box_residual_command_embeds_paths_and_marker():
+    from app.services.image_hardening.scanning import box_residual_command
+
+    cmd = box_residual_command(
+        "/scratch/full.json",
+        out_report_path="/scratch/residual.json",
+        out_vex_path="/scratch/vex.json",
+        image_ref="nginx:1.25",
+        image_digest="sha256:abc",
+    )
+    assert "/scratch/full.json" in cmd
+    assert "/scratch/residual.json" in cmd
+    assert "/scratch/vex.json" in cmd
+    assert "nginx:1.25" in cmd
+    assert "sha256:abc" in cmd
+    assert "python3" in cmd
+    assert "__HARDEN_RESIDUAL__" in cmd
+    assert "FixedVersion" in cmd  # skips fixable
+    assert "openvex.dev" in cmd  # builds VEX on box
+
+
+def test_parse_box_residual_counts_reads_summary():
+    from app.services.image_hardening.scanning import parse_box_residual_counts
+
+    out = (
+        "trivy noise\n"
+        '__HARDEN_RESIDUAL__ {"ok": true, "total": 22, "critical": 1, "high": 21, '
+        '"medium": 0, "low": 0, "unknown": 0}\n'
+    )
+    c = parse_box_residual_counts(out)
+    assert c["total"] == 22
+    assert c["critical"] == 1
+    assert c["high"] == 21
+
+
+def test_parse_box_residual_counts_hard_fails_on_missing_and_not_ok():
+    from app.services.image_hardening.scanning import ScanParseError, parse_box_residual_counts
+
+    with pytest.raises(ScanParseError):
+        parse_box_residual_counts("no marker here")
+    with pytest.raises(ScanParseError):
+        parse_box_residual_counts('__HARDEN_RESIDUAL__ {"ok": false, "error": "boom"}')
+
+
+# ---- residual report + OpenVEX builders ----
+def _residual_findings():
+    return [
+        {
+            "id": "CVE-2026-6653",
+            "severity": "CRITICAL",
+            "status": "affected",
+            "pkgs": ["libxml2"],
+            "installed": "2.9.14",
+            "title": "libxml2 DoS",
+        },
+        {
+            "id": "CVE-2026-85091",
+            "severity": "HIGH",
+            "status": "will_not_fix",
+            "pkgs": ["zlib"],
+            "installed": "1.2.13",
+            "title": "zlib overflow",
+        },
+        {
+            "id": "CVE-2026-18495",
+            "severity": "MEDIUM",
+            "status": "fix_deferred",
+            "pkgs": ["tiff"],
+            "installed": "4.5.0",
+            "title": "tiff issue",
+        },
+    ]
+
+
+def test_build_residual_report_counts_and_orders():
+    from app.services.image_hardening.residual import build_residual_report
+
+    rep = build_residual_report(
+        findings=_residual_findings(),
+        image_ref="r/repo:tag",
+        image_digest="sha256:abc",
+        artifact_name="nginx:1.25",
+    )
+    assert rep["counts"] == {
+        "total": 3,
+        "critical": 1,
+        "high": 1,
+        "medium": 1,
+        "low": 0,
+        "unknown": 0,
+    }
+    # Ordered by severity rank: CRITICAL first.
+    assert rep["findings"][0]["severity"] == "CRITICAL"
+    assert rep["findings"][0]["id"] == "CVE-2026-6653"
+    assert rep["image_digest"] == "sha256:abc"
+
+
+def test_build_openvex_shape_and_status():
+    from app.services.image_hardening.residual import build_openvex
+
+    vex = build_openvex(
+        findings=_residual_findings(),
+        image_ref="r/repo:tag",
+        image_digest="sha256:abc",
+    )
+    assert vex["@context"].startswith("https://openvex.dev/ns/")
+    assert len(vex["statements"]) == 3
+    st = vex["statements"][0]
+    assert st["status"] == "affected"  # present + unfixable
+    assert st["vulnerability"]["name"].startswith("CVE-")
+    assert "sha256:abc" in st["products"][0]["@id"]
+    assert "no upstream fix" in st["action_statement"].lower()
+
+
+def test_residual_summary_for_scan():
+    from app.services.image_hardening.residual import (
+        build_residual_report,
+        residual_summary_for_scan,
+    )
+
+    rep = build_residual_report(
+        findings=_residual_findings(), image_ref="r:t", image_digest="sha256:x"
+    )
+    s = residual_summary_for_scan(rep)
+    assert s["residual_total"] == 3
+    assert s["residual_critical"] == 1
+    assert s["residual_high"] == 1
+    assert s["residual_medium"] == 1
+
+
+def test_build_residual_report_empty_is_all_zero():
+    from app.services.image_hardening.residual import build_residual_report
+
+    rep = build_residual_report(findings=[], image_ref="r:t", image_digest="sha256:x")
+    assert rep["counts"]["total"] == 0
+    assert rep["findings"] == []
+
+
 def test_scan_result_gate_property():
     assert (
         CopaScanResult(fixable_critical=0, fixable_high=0, raw_summary="").has_fixable_gate_findings
@@ -708,7 +847,8 @@ from app.services.image_hardening.scanning import ScanClassification  # noqa: E4
 
 def _publish_sets_digest(_copa, c, _ref, _cfg):
     c.published_digest = "sha256:deadbeef"
-    return [_ok_step("push patched")]
+    # _copa_publish now returns (publish_steps, residual_steps, residual_report).
+    return [_ok_step("push patched")], [], None
 
 
 def _copa_fixture(monkeypatch, *, scans, remediate_result=None, dockerfile=None):
@@ -775,6 +915,84 @@ def test_lifecycle_os_only_runs_copa_then_clean(monkeypatch):
     assert out.scan_summary["intake_os_fixable"] == 1
     assert out.scan_summary["intake_total_fixable"] == 1
     assert out.scan_summary["total_fixable"] == 0  # final (post-copa) is clean
+
+
+def test_lifecycle_merges_residual_summary_into_scan_summary(monkeypatch):
+    """When publish returns a residual report, residual_* keys + s3 keys land in
+    scan_summary (run stays success — residual is non-gating)."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[_os_only(), _clean()],
+        remediate_result={
+            "status": "clean",
+            "iterations": 1,
+            "final_image_ref": "img:patched",
+            "steps": [],
+            "final_scan": None,
+            "message": "",
+        },
+    )
+
+    def _publish_with_residual(_copa, c, _ref, _cfg):
+        c.published_digest = "sha256:deadbeef"
+        # (publish_steps, residual_steps, residual_report with uploaded=True)
+        report = {
+            "counts": {"total": 1, "critical": 0, "high": 1, "medium": 0, "low": 0, "unknown": 0},
+            "uploaded": True,
+        }
+        return [_ok_step("push patched")], [_ok_step("upload residual report")], report
+
+    monkeypatch.setattr(orch, "_copa_publish", _publish_with_residual)
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+    assert out.scan_summary["residual_total"] == 1
+    assert out.scan_summary["residual_high"] == 1
+    assert out.scan_summary["residual_s3_key"] == "residual/sha256:deadbeef.json"
+    assert out.scan_summary["vex_s3_key"] == "vex/sha256:deadbeef.openvex.json"
+
+
+def test_lifecycle_residual_upload_failure_is_non_gating(monkeypatch):
+    """A residual upload failure (e.g. S3 perms) must NOT fail the run — the
+    image is already patched + published. Run stays success; counts recorded,
+    S3 keys NOT advertised."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[_os_only(), _clean()],
+        remediate_result={
+            "status": "clean",
+            "iterations": 1,
+            "final_image_ref": "img:patched",
+            "steps": [],
+            "final_scan": None,
+            "message": "",
+        },
+    )
+
+    def _publish_residual_upload_fails(_copa, c, _ref, _cfg):
+        c.published_digest = "sha256:deadbeef"
+        report = {
+            "counts": {"total": 2, "critical": 1, "high": 1, "medium": 0, "low": 0, "unknown": 0},
+            "uploaded": False,  # S3 PutObject denied
+        }
+        failed_upload = StepResult(
+            step_num=18,
+            action="upload residual report",
+            command="aws s3 cp ...",
+            stderr="AccessDenied",
+            exit_code=1,
+            status="failed",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+        )
+        return [_ok_step("push patched")], [failed_upload], report
+
+    monkeypatch.setattr(orch, "_copa_publish", _publish_residual_upload_fails)
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    # Run is STILL a success despite the residual upload failure.
+    assert out.status == "success"
+    assert out.scan_summary["residual_total"] == 2
+    assert out.scan_summary.get("residual_status") == "computed_not_uploaded"
+    assert "residual_s3_key" not in out.scan_summary
 
 
 def test_lifecycle_already_clean_records_zero_intake(monkeypatch):

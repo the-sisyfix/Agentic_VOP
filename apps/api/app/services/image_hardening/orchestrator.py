@@ -460,10 +460,14 @@ def _finalize_clean(
     """
     intake_dict = _intake_summary(intake if intake is not None else scan)
     set_status(sb, run_id, "publishing")
-    publish_steps = _copa_publish(copa, ctx, final_ref, cfg)
+    publish_steps, residual_steps, residual_report = _copa_publish(copa, ctx, final_ref, cfg)
     steps.extend(publish_steps)
     gate = _gate_from(scan)
+    # The publish-success gate considers ONLY the core publish steps. Residual
+    # steps are recorded for traceability but a residual failure (e.g. S3 perms)
+    # must NEVER fail the run — the image is already patched + published.
     if any(s.status == "failed" for s in publish_steps):
+        steps.extend(residual_steps)
         return HardeningOutcome(
             status="failed",
             step_results=steps,
@@ -471,6 +475,23 @@ def _finalize_clean(
             scan_summary={**scan.summary(), **intake_dict, "publish": "failed"},
             error_message="publish failed",
         )
+    # Core publish succeeded → record residual steps + summary (non-gating).
+    steps.extend(residual_steps)
+    residual_dict: dict = {}
+    residual_keys: dict = {}
+    if residual_report is not None:
+        from .residual import residual_summary_for_scan  # noqa: PLC0415
+
+        # Counts are always recorded (we computed them from the final image).
+        residual_dict = residual_summary_for_scan(residual_report)
+        if residual_report.get("uploaded") and ctx.published_digest:
+            # Only advertise S3 keys when the artifacts actually landed.
+            residual_keys = {
+                "residual_s3_key": f"residual/{ctx.published_digest}.json",
+                "vex_s3_key": f"vex/{ctx.published_digest}.openvex.json",
+            }
+        elif not residual_report.get("uploaded"):
+            residual_keys = {"residual_status": "computed_not_uploaded"}
     if ctx.published_digest:
         try:
             set_published(
@@ -491,7 +512,13 @@ def _finalize_clean(
         published_digest=ctx.published_digest,
         published_tag=ctx.published_tag,
         sbom_s3_key=sbom_key,
-        scan_summary={**scan.summary(), **intake_dict, "iterations": iterations},
+        scan_summary={
+            **scan.summary(),
+            **intake_dict,
+            **residual_dict,
+            **residual_keys,
+            "iterations": iterations,
+        },
     )
 
 
@@ -675,9 +702,15 @@ def _copa_publish(
     ctx: HardenContext,
     patched_ref: str,
     cfg: HardeningConfig,
-) -> list:
-    """Push the clean patched image at the client's intended tag, resolve its
-    digest (set on ctx), and upload the SBOM. Returns StepResults.
+) -> tuple[list, list, dict | None]:
+    """Push the clean patched image, resolve its digest (set on ctx), upload the
+    SBOM, and generate the residual report + VEX.
+
+    Returns (publish_steps, residual_steps, residual_report):
+      - publish_steps : core steps (login→push→SBOM); a failure here fails run.
+      - residual_steps: residual scan/upload steps; failures here are NON-gating
+                        (recorded for traceability but never fail the run).
+      - residual_report: {"counts": {...}} or None if residual couldn't run.
 
     Reuses the copa strategy's executor + safety-validated _run. Command shapes
     mirror the proven rebuild path's publish tail.
@@ -688,6 +721,10 @@ def _copa_publish(
     wd = cfg.copa_scratch_dir
     final_ref = f"{ctx.target_registry}:{ctx.published_tag}"
     steps: list = []
+    # Residual steps are tracked SEPARATELY so a residual failure (e.g. S3
+    # perms) never counts against the publish-success gate — the image is
+    # already patched + published by then.
+    residual_steps: list = []
 
     def step(num, action, command, timeout_s):
         start = utcnow()
@@ -730,7 +767,7 @@ def _copa_publish(
         f"| docker login --username AWS --password-stdin {ctx.target_registry.split('/')[0]}"
     )
     if not step(10, "ECR login", login, 120):
-        return steps
+        return steps, residual_steps, None
     # Ensure the image is present LOCALLY before retag — correct for BOTH paths:
     #   - copa-patched path: `patched_ref` is a LOCAL-ONLY image copa built on
     #     the box (never pushed anywhere). It is already present → inspect
@@ -743,11 +780,11 @@ def _copa_publish(
         f"docker image inspect {patched_ref} >/dev/null 2>&1 || docker pull {patched_ref}"
     )
     if not step(11, "ensure image local", ensure_local, 600):
-        return steps
+        return steps, residual_steps, None
     if not step(12, "retag patched", f"docker tag {patched_ref} {final_ref}", 60):
-        return steps
+        return steps, residual_steps, None
     if not step(13, "push patched", f"docker push {final_ref}", 600):
-        return steps
+        return steps, residual_steps, None
 
     digest_cmd = (
         f"docker inspect --format='{{{{index .RepoDigests 0}}}}' {final_ref} | cut -d'@' -f2"
@@ -758,6 +795,7 @@ def _copa_publish(
         if digest.startswith("sha256:"):
             ctx.published_digest = digest
 
+    residual_report: dict | None = None
     if ctx.published_digest and (ctx.sbom_bucket or cfg.sbom_bucket):
         bucket = ctx.sbom_bucket or cfg.sbom_bucket
         key = f"sboms/{ctx.published_digest}.spdx.json"
@@ -767,8 +805,99 @@ def _copa_publish(
             step(
                 16, "upload SBOM", f"aws s3 cp /tmp/harden-sbom.spdx.json s3://{bucket}/{key}", 120
             )
+        # Residual report + OpenVEX from the FINAL image's full-scope scan.
+        # Residual = unfixable CVEs that remain after copa patched everything
+        # fixable. Reported (not gating) + uploaded so the client's ECR view is
+        # explained rather than contradicted. NOTE: residual steps go in their
+        # OWN list — a residual failure (e.g. S3 perms) must NEVER fail the run,
+        # since the image is already patched + published.
+        residual_report = _generate_residual_artifacts(
+            copa, ctx, cfg, final_ref, bucket, residual_steps, executor
+        )
 
-    return steps
+    return steps, residual_steps, residual_report
+
+
+def _generate_residual_artifacts(copa, ctx, cfg, final_ref, bucket, steps, executor):
+    """Extract residual (unfixable) findings from the final image, build the
+    itemized report + OpenVEX, and upload both to S3. Returns the residual
+    report dict (or None on failure).
+
+    Best-effort + NON-GATING: residual reporting never fails the run (the image
+    is already published + policy-zero on fixable). A failure here only means we
+    couldn't attach the residual artifacts; it does not change the outcome.
+    Appends its own StepResults onto the shared `steps` list for traceability.
+    """
+    from .models import StepResult  # noqa: PLC0415
+    from .scanning import box_residual_command, parse_box_residual_counts  # noqa: PLC0415
+
+    def run_step(num, action, command, timeout_s):
+        start = utcnow()
+        try:
+            r = copa._run(executor, command, workdir=cfg.copa_scratch_dir, timeout_s=timeout_s)  # noqa: SLF001
+        except Exception as e:  # noqa: BLE001
+            steps.append(
+                StepResult(
+                    step_num=num,
+                    action=action,
+                    command=command,
+                    stderr=f"{type(e).__name__}: {e}",
+                    exit_code=1,
+                    status="failed",
+                    started_at=start,
+                    finished_at=utcnow(),
+                )
+            )
+            return None
+        steps.append(
+            StepResult(
+                step_num=num,
+                action=action,
+                command=command,
+                stdout=(r.stdout or "")[:2000],
+                stderr=(r.stderr or "")[:1000],
+                exit_code=r.exit_code,
+                duration_ms=r.duration_ms,
+                status="success" if r.exit_code == 0 else "failed",
+                started_at=start,
+                finished_at=utcnow(),
+                ssm_command_id=r.ssm_command_id,
+            )
+        )
+        return r
+
+    scratch = cfg.copa_scratch_dir
+    digest = ctx.published_digest or ""
+    trivy_report = f"{scratch}/trivy-residual-{ctx.hardening_run_id}.json"
+    out_report = f"{scratch}/residual-{ctx.hardening_run_id}.json"
+    out_vex = f"{scratch}/vex-{ctx.hardening_run_id}.json"
+    # Full-scope scan of the FINAL image (NO --ignore-unfixed: residual is the
+    # unfixable set). The box then BUILDS the report + VEX to FILES and prints
+    # only a tiny counts summary — the residual list is far too large for SSM
+    # stdout (~24 KB cap), so we ship FILES (like the SBOM), not stdout.
+    scan_cmd = (
+        f"trivy image --pkg-types os,library -f json -o '{trivy_report}' {final_ref} "
+        f"&& {box_residual_command(trivy_report, out_report_path=out_report, out_vex_path=out_vex, image_ref=final_ref, image_digest=digest)}"
+    )
+    r = run_step(17, "residual scan + build artifacts", scan_cmd, 600)
+    if r is None or r.exit_code != 0:
+        return None
+    try:
+        counts = parse_box_residual_counts(r.stdout or "")
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Upload the FILES the box just wrote (full content, never truncated).
+    rkey = f"residual/{digest}.json"
+    vkey = f"vex/{digest}.openvex.json"
+    ru = run_step(
+        18, "upload residual report", f"aws s3 cp '{out_report}' s3://{bucket}/{rkey}", 120
+    )
+    vu = run_step(19, "upload VEX", f"aws s3 cp '{out_vex}' s3://{bucket}/{vkey}", 120)
+    uploaded = bool(ru and ru.exit_code == 0 and vu and vu.exit_code == 0)
+    # Return counts (always, for scan_summary) + whether the S3 artifacts
+    # actually landed (so we don't advertise S3 keys that don't exist).
+    return {"counts": counts, "uploaded": uploaded}
 
 
 def _with_defaults(cfg: HardeningConfig, target_registry: str) -> HardeningConfig:

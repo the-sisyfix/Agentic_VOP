@@ -180,6 +180,144 @@ def parse_box_summary(stdout: str) -> ScanClassification:
         raise ScanParseError(f"scan summary missing counts: {e}: {obj!r}") from e
 
 
+# Marker for the compact RESIDUAL list the box prints (distinct from the count
+# summary marker so the two can be parsed independently).
+_RESIDUAL_MARKER = "__HARDEN_RESIDUAL__"
+
+
+def box_residual_command(
+    report_path: str,
+    *,
+    out_report_path: str,
+    out_vex_path: str,
+    image_ref: str,
+    image_digest: str,
+) -> str:
+    """Build the residual REPORT + OpenVEX ON THE BOX, write them to FILES, and
+    print only a tiny counts summary to stdout.
+
+    "Residual" = findings with NO available fix (no FixedVersion): the CVEs that
+    remain after copa patched everything fixable — the honest residual we report
+    (and VEX) to the client, matching why their ECR console still shows CVEs on
+    a correctly-hardened image.
+
+    WHY FILES, NOT STDOUT: the residual list for a fat base (every unfixable CVE
+    with packages + titles) easily exceeds SSM's ~24 KB stdout cap, which would
+    truncate the JSON mid-stream (exactly the trap we hit with the raw report).
+    So the box WRITES the full report + VEX JSON to disk (no size limit) — the
+    orchestrator then `aws s3 cp`s those files, same as the SBOM. Only a small
+    counts summary comes back via stdout:
+
+        __HARDEN_RESIDUAL__ {"ok": true, "total": N, "critical": N, "high": N,
+                             "medium": N, "low": N, "unknown": N}
+    or on failure:
+        __HARDEN_RESIDUAL__ {"ok": false, "error": "..."}
+
+    Findings are deduplicated BY CVE ID (packages aggregated), matching the
+    client's ECR/Inspector grouping rather than trivy's per-binary duplication.
+    All severities are included (full transparency; the GATE stays crit/high).
+    The report + VEX JSON written here mirror the shapes in residual.py so the
+    on-box and in-process builders stay consistent.
+    """
+    # argv: [1]=trivy report path, [2]=marker, [3]=out report, [4]=out vex,
+    #       [5]=image_ref, [6]=image_digest
+    py = (
+        "import json,sys,datetime\n"
+        "p=sys.argv[1]; mk=sys.argv[2]; orp=sys.argv[3]; ovp=sys.argv[4]\n"
+        "img=sys.argv[5]; dig=sys.argv[6]\n"
+        "try:\n"
+        "    d=json.load(open(p))\n"
+        "except Exception as e:\n"
+        "    print(mk+' '+json.dumps({'ok':False,'error':'read/parse: '+str(e)[:200]}))\n"
+        "    sys.exit(0)\n"
+        "agg={}\n"
+        "for r in (d.get('Results') or []):\n"
+        "    for v in (r.get('Vulnerabilities') or []):\n"
+        "        if v.get('FixedVersion'): continue\n"
+        "        vid=v.get('VulnerabilityID') or ''\n"
+        "        if not vid: continue\n"
+        "        e=agg.get(vid)\n"
+        "        if e is None:\n"
+        "            e={'id':vid,'severity':(v.get('Severity') or 'UNKNOWN').upper(),"
+        "'status':v.get('Status') or '','pkgs':set(),"
+        "'installed':v.get('InstalledVersion') or '',"
+        "'title':(v.get('Title') or '')[:200]}\n"
+        "            agg[vid]=e\n"
+        "        pn=v.get('PkgName')\n"
+        "        if pn: e['pkgs'].add(pn)\n"
+        "order=['CRITICAL','HIGH','MEDIUM','LOW','UNKNOWN']\n"
+        "findings=[]\n"
+        "for e in agg.values():\n"
+        "    e['packages']=sorted(e.pop('pkgs'))\n"
+        "    e['installed_version']=e.pop('installed')\n"
+        "    if e['severity'] not in order: e['severity']='UNKNOWN'\n"
+        "    findings.append(e)\n"
+        "findings.sort(key=lambda x:(order.index(x['severity']),x['id']))\n"
+        "counts={s.lower():0 for s in order}\n"
+        "for f in findings: counts[f['severity'].lower()]+=1\n"
+        "counts['total']=len(findings)\n"
+        "now=datetime.datetime.now(datetime.timezone.utc).isoformat()\n"
+        "report={'schema':'sisyfix.image-hardening.residual/v1','generated_at':now,"
+        "'image_ref':img,'image_digest':dig,"
+        "'artifact_name':d.get('ArtifactName') or '',"
+        "'definition':'Residual = CVEs with NO available fix at hardening time "
+        "(unfixable). All fixable CRITICAL/HIGH were patched (policy-zero gate).',"
+        "'counts':counts,'findings':findings}\n"
+        "prod='pkg:oci/'+img.rsplit(':',1)[0].rsplit('/',1)[-1]+'@'+dig if dig else img\n"
+        "stmts=[]\n"
+        "for f in findings:\n"
+        "    stmts.append({'vulnerability':{'name':f['id']},'products':[{'@id':prod}],"
+        "'status':'affected','action_statement':'No upstream fix available at "
+        "hardening time (vendor status: '+(f['status'] or 'no-fix-available')+'). "
+        "All fixable findings were patched; cannot remediate by patching today.',"
+        "'action_statement_timestamp':now})\n"
+        "vex={'@context':'https://openvex.dev/ns/v0.2.0',"
+        "'@id':'https://sisyfix/vex/'+(dig or 'unknown'),"
+        "'author':'Sisyfix Image Hardening','timestamp':now,'version':1,'statements':stmts}\n"
+        "open(orp,'w').write(json.dumps(report,indent=2))\n"
+        "open(ovp,'w').write(json.dumps(vex,indent=2))\n"
+        "print(mk+' '+json.dumps({'ok':True,**counts}))\n"
+    )
+    return (
+        f"python3 - '{report_path}' '{_RESIDUAL_MARKER}' '{out_report_path}' "
+        f"'{out_vex_path}' '{image_ref}' '{image_digest}' "
+        f"<<'__HARDEN_RES_EOF__'\n{py}__HARDEN_RES_EOF__"
+    )
+
+
+def parse_box_residual_counts(stdout: str) -> dict:
+    """Parse the tiny counts summary emitted by `box_residual_command`.
+
+    Returns {"total","critical","high","medium","low","unknown"}. HARD-FAILS
+    (ScanParseError) on missing/malformed output or ok=false — residual
+    reporting must not silently misrepresent the image as cleaner than it is.
+    The full report + VEX were written to FILES on the box (uploaded separately).
+    """
+    if not stdout:
+        raise ScanParseError("empty residual output from build box")
+    line = None
+    for ln in stdout.splitlines():
+        if ln.startswith(_RESIDUAL_MARKER):
+            line = ln[len(_RESIDUAL_MARKER) :].strip()
+            break
+    if line is None:
+        raise ScanParseError(f"no residual marker in box output: {stdout[:200]!r}")
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError) as e:
+        raise ScanParseError(f"residual payload not valid JSON: {e}: {line[:200]!r}") from e
+    if not obj.get("ok"):
+        raise ScanParseError(f"box could not extract residual: {obj.get('error')!r}")
+    return {
+        "total": int(obj.get("total", 0)),
+        "critical": int(obj.get("critical", 0)),
+        "high": int(obj.get("high", 0)),
+        "medium": int(obj.get("medium", 0)),
+        "low": int(obj.get("low", 0)),
+        "unknown": int(obj.get("unknown", 0)),
+    }
+
+
 def classify_trivy_report(report_json: str) -> ScanClassification:
     """Parse a full-scope trivy JSON report (as a STRING) into fixable crit/high.
 
