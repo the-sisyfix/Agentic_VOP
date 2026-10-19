@@ -96,3 +96,39 @@ dependent.
 "how do we choose the correct fixed version" problems. For the green proof, the
 current behavior pins `urllib3==2.0.6` (first token), which we verified installs
 cleanly on Python 3.12, so the demo run is unaffected.
+
+**Update (run #16).** In the live green run the package had 7 findings and the
+bumper's "highest FixedVersion across findings" aggregation (`_highest_version`)
+selected `urllib3==2.8.0` — higher than any single finding's first-listed token.
+So the `split(",")[0]` concern was masked by the cross-finding aggregation here,
+but the underlying ad-hoc selection remains and should still be made principled.
+
+---
+
+## 3. Rebuild leg mutates requirements.txt in the git working tree
+
+**Discovered:** run #15 / before run #16 (box `git pull` was blocked).
+
+**Problem.** The dependency-bump leg rewrites `requirements.txt` IN PLACE inside
+the build context — which, on the build box, is a checked-out git working tree
+(`/opt/image-forge-src/...`). After a rebuild run the tree is dirty, so the next
+`git pull` on the box aborts with "local changes would be overwritten".
+
+**Current behavior / workaround.** Manually discard the pipeline's edit before
+pulling:
+`git checkout -- image-forge/base-images/<sample>/requirements.txt` then pull.
+Acceptable for the test fixture, NOT acceptable for a production client build.
+
+**Why it matters.** In production the build context is the client's source, not
+a repo we pull — but we still should not mutate the caller's working tree as a
+side effect. It is surprising and leaves dirty state.
+
+**Candidate fixes (decide later).**
+- Copy the build context to an ephemeral scratch dir and bump/build THERE,
+  leaving the original untouched.
+- Build from a temp requirements file passed via build-arg / `-f`, not an
+  in-place rewrite.
+- (Test-box only) have the pipeline `git stash`/reset the fixture before build.
+
+**Status:** DEFERRED. Prefer the "build in an ephemeral copy" approach — it also
+aligns with the future ephemeral-build-box model.
