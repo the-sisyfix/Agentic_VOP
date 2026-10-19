@@ -132,3 +132,29 @@ side effect. It is surprising and leaves dirty state.
 
 **Status:** DEFERRED. Prefer the "build in an ephemeral copy" approach — it also
 aligns with the future ephemeral-build-box model.
+
+---
+
+## 4. Rebuild leg collapses a multi-architecture image to arm64-only
+
+**Discovered:** run #16 (confirmed in the ECR console — the published Image Index
+had one real platform: `arm64/linux`, plus the buildkit attestation manifest
+shown as `unknown/unknown`).
+
+**Problem.** The build box is arm64 (Graviton). The dependency-rebuild leg runs a
+plain `docker build`, which produces a SINGLE-architecture (arm64) image. If the
+client's original image was multi-platform (e.g. amd64 + arm64), the rebuilt
+image drops every architecture except arm64.
+
+**Why it matters.** For a real client this is a silent regression: their amd64
+workloads would have no image. The dependency-fix path specifically narrows the
+platform set; the copa (OS) path can be made multi-platform-aware separately.
+
+**Candidate fixes (decide later — part of the multi-arch milestone).**
+- `docker buildx build --platform linux/amd64,linux/arm64 --push` (needs QEMU or
+  native amd64 build capacity on the build box).
+- A per-architecture build matrix (arm64 on Graviton, amd64 on an amd64 runner),
+  then assemble a manifest list.
+
+**Status:** DEFERRED — part of the broader multi-arch milestone (the copa path is
+also arm64-only today). Known and accepted for the current single-arch MVP.
