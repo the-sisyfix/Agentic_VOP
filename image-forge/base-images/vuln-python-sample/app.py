@@ -8,15 +8,13 @@ packages so they are unambiguously present/used, then exit.
 
 import jinja2
 import requests
-import urllib3
 import yaml
 
 
 def main() -> None:
-    # Reference each dependency so it is clearly a real, used import.
+    # Reference each declared dependency so it is clearly a real, used import.
     versions = {
         "requests": requests.__version__,
-        "urllib3": urllib3.__version__,
         "jinja2": jinja2.__version__,
         "pyyaml": yaml.__version__,
     }
