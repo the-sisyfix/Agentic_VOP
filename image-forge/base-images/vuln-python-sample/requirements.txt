@@ -2,23 +2,18 @@
 # DELIBERATELY VULNERABLE pip manifest — test fixture for the hardening
 # pipeline's dependency-bump (rebuild) leg.
 #
-# Each package is a DIRECT, DECLARED dependency pinned to an OLD version with
-# known CRITICAL/HIGH CVEs that have an available FixedVersion, so trivy reports
-# them as fixable lang-pkgs findings and the deterministic pip-bump logic
-# (compute_pip_bumps) pins them forward. The pins are chosen to be mutually
-# compatible (no cross-constraints) and to have Python 3.12 wheels so the image
-# builds cleanly.
+# urllib3 1.26.5 is a DIRECT, DECLARED dependency with known HIGH CVEs that have
+# an available (and 3.12-installable) FixedVersion, so trivy reports it as a
+# fixable lang-pkgs finding and the deterministic pip-bump logic pins it forward
+# and the rebuilt image installs + re-scans clean.
+#
+# Why urllib3 1.26.5 specifically: verified on the build box that (a) 1.26.5
+# installs on python:3.12-slim-bookworm, (b) trivy flags it HIGH-fixable
+# (e.g. CVE-2023-43804), and (c) its fixed version installs cleanly on 3.12
+# (unlike PyYAML 5.4, whose fix is uninstallable — see docs/image-forge/
+# known-limitations.md #1). Kept to a SINGLE direct pin, no cross-constraints.
 #
 # DO NOT use this image for anything real — it exists only to prove the leg.
-# The exact CVE set depends on trivy's current DB; we probe-scan before relying
-# on specific findings.
 # =============================================================================
 
-# requests 2.30.0 — CVE-2023-32681 (Proxy-Authorization leak on HTTPS redirect,
-# HIGH), fixed in 2.31.0. Relaxed urllib3 constraint, so no dependency conflict.
-requests==2.30.0
-# jinja2 2.11.3 — multiple XSS / sandbox CVEs fixed in later releases.
-jinja2==2.11.3
-# PyYAML 5.3.1 — CVE-2020-14343 (arbitrary code execution via full_load) fixed
-# in 5.4; 5.3.1 ships a 3.12-compatible wheel.
-PyYAML==5.3.1
+urllib3==1.26.5

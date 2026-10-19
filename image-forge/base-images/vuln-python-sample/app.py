@@ -1,24 +1,16 @@
 """Trivial payload for the vuln-python-sample test image.
 
-The application is intentionally meaningless — this image exists only to carry
-deliberately-vulnerable pip dependencies so the hardening pipeline's
+The application is intentionally meaningless — this image exists only to carry a
+deliberately-vulnerable pip dependency (urllib3) so the hardening pipeline's
 dependency-bump (rebuild) leg can be proven end-to-end. We import the declared
-packages so they are unambiguously present/used, then exit.
+package so it is unambiguously present/used, then exit.
 """
 
-import jinja2
-import requests
-import yaml
+import urllib3
 
 
 def main() -> None:
-    # Reference each declared dependency so it is clearly a real, used import.
-    versions = {
-        "requests": requests.__version__,
-        "jinja2": jinja2.__version__,
-        "pyyaml": yaml.__version__,
-    }
-    print(f"vuln-python-sample up; dependency versions: {versions}")
+    print(f"vuln-python-sample up; urllib3 version: {urllib3.__version__}")
 
 
 if __name__ == "__main__":

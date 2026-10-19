@@ -33,7 +33,7 @@ from .persistence import (
     set_sign_dispatched,
     set_status,
 )
-from .copa_strategy import CopaPatchStrategy
+from .copa_strategy import CopaPatchStrategy, _capture
 from .signing import dispatch_signing_workflow
 from .strategy import ImageHardenStrategy
 
@@ -563,8 +563,10 @@ def _run_rebuild_leg(copa, ctx, cfg, current_ref):
                 step_num=num,
                 action=action,
                 command=command,
-                stdout=(r.stdout or "")[:2000],
-                stderr=(r.stderr or "")[:1000],
+                # Keep the TAIL + hoist error-signal lines so a docker build
+                # failure (error at the end) is never lost to truncation.
+                stdout=_capture(r.stdout, 3000),
+                stderr=_capture(r.stderr, 5000),
                 exit_code=r.exit_code,
                 duration_ms=r.duration_ms,
                 status="success" if r.exit_code == 0 else "failed",
