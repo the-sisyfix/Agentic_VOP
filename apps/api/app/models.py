@@ -55,8 +55,14 @@ class HardeningTriggerRequest(BaseModel):
     # Remediation mode: "patch" = copa in-place OS patch (default, primary);
     # "rebuild" = build-from-Dockerfile (dependency/toolchain fixes; wired next).
     mode: Literal["patch", "rebuild"] = "patch"
-    # Optional Dockerfile path on the build box — only used by "rebuild" mode.
-    dockerfile_path: str | None = None
+    # Optional Dockerfile path on the build box — used by the rebuild leg
+    # (copa path triggers it when dependency CVEs remain + a Dockerfile exists).
+    dockerfile_path: str | None = Field(default=None, max_length=1024)
+    # Optional build-context directory on the build box (where the Dockerfile +
+    # requirements.txt live). The rebuild leg reads/writes requirements.txt here
+    # and runs `docker build <build_directory>`. Falls back to the configured
+    # default when omitted.
+    build_directory: str | None = Field(default=None, max_length=1024)
 
 
 class HardeningRunCreated(BaseModel):

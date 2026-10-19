@@ -1,0 +1,23 @@
+# =============================================================================
+# DELIBERATELY VULNERABLE pip manifest — test fixture for the hardening
+# pipeline's dependency-bump (rebuild) leg.
+#
+# Each package is pinned to an OLD version with known CRITICAL/HIGH CVEs that
+# have an available FixedVersion, so trivy reports them as fixable lang-pkgs
+# findings and the deterministic pip-bump logic (compute_pip_bumps) pins them
+# forward. These are DIRECT, DECLARED dependencies (not transitive) so they are
+# in-scope for the bump (transitive findings are reported as honest residual).
+#
+# DO NOT use this image for anything real — it exists only to prove the leg.
+# The exact CVE set depends on trivy's current DB; we probe-scan before relying
+# on specific findings.
+# =============================================================================
+
+# requests 2.19.1 — pulls in old urllib3/certifi; multiple CVEs with fixes.
+requests==2.19.1
+# urllib3 1.24.1 — several CRITICAL/HIGH CVEs (CRLF, redirect, etc.) with fixes.
+urllib3==1.24.1
+# jinja2 2.10 — HIGH CVEs (sandbox escape / ReDoS) with fixes.
+jinja2==2.10
+# PyYAML 5.1 — CRITICAL arbitrary code execution (CVE-2020-14343) fixed in 5.4.
+PyYAML==5.1

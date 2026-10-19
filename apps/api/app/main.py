@@ -283,6 +283,7 @@ def trigger_hardening(
                 auto_sign=payload.auto_sign,
                 mode=payload.mode,
                 dockerfile_path=payload.dockerfile_path,
+                build_directory=payload.build_directory,
                 sb=sb,
             )
         except Exception:  # noqa: BLE001

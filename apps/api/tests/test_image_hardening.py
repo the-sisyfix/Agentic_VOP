@@ -372,6 +372,45 @@ def test_parse_box_residual_counts_hard_fails_on_missing_and_not_ok():
         parse_box_residual_counts('__HARDEN_RESIDUAL__ {"ok": false, "error": "boom"}')
 
 
+# ---- box deps extractor (lang-pkgs subset for the bump leg) ----
+def test_box_deps_report_command_embeds_path_and_marker():
+    from app.services.image_hardening.scanning import box_deps_report_command
+
+    cmd = box_deps_report_command("/scratch/deps.json")
+    assert "/scratch/deps.json" in cmd
+    assert "python3" in cmd
+    assert "__HARDEN_DEPS__" in cmd
+    assert "lang-pkgs" in cmd
+
+
+def test_parse_box_deps_report_returns_compute_compatible_json():
+    import json as _json
+
+    from app.services.image_hardening.dep_bump import compute_pip_bumps
+    from app.services.image_hardening.scanning import parse_box_deps_report
+
+    out = (
+        "trivy noise\n"
+        '__HARDEN_DEPS__ {"ok": true, "report": {"Results": [{"Class": "lang-pkgs", '
+        '"Type": "pip", "Vulnerabilities": [{"PkgName": "jinja2", '
+        '"FixedVersion": "2.11.3", "Severity": "HIGH", "VulnerabilityID": "CVE-X"}]}]}}\n'
+    )
+    report_json = parse_box_deps_report(out)
+    # Round-trips to the shape compute_pip_bumps consumes.
+    assert _json.loads(report_json)["Results"][0]["Type"] == "pip"
+    plan = compute_pip_bumps(report_json, "jinja2==2.10\n")
+    assert plan.to_pin == {"jinja2": "2.11.3"}
+
+
+def test_parse_box_deps_report_hard_fails_on_missing_and_not_ok():
+    from app.services.image_hardening.scanning import ScanParseError, parse_box_deps_report
+
+    with pytest.raises(ScanParseError):
+        parse_box_deps_report("no marker")
+    with pytest.raises(ScanParseError):
+        parse_box_deps_report('__HARDEN_DEPS__ {"ok": false, "error": "boom"}')
+
+
 # ---- residual report + OpenVEX builders ----
 def _residual_findings():
     return [
@@ -839,6 +878,39 @@ def test_run_hardening_mode_rebuild_routes_to_rebuild(monkeypatch):
     )
     assert called["rebuild"] is True
     assert called["copa"] is False
+
+
+def test_run_hardening_propagates_build_directory_and_dockerfile(monkeypatch):
+    """build_directory + dockerfile_path from the trigger must reach the ctx so
+    the rebuild leg uses the client's build context (not the default dir)."""
+    captured = {}
+
+    def fake_copa_lifecycle(_sb, _rid, _copa, ctx, **_k):
+        captured["build_directory"] = ctx.build_directory
+        captured["dockerfile_path"] = ctx.dockerfile_path
+        from app.services.image_hardening.models import HardeningOutcome
+
+        return HardeningOutcome(status="success")
+
+    monkeypatch.setattr(orch, "_run_copa_lifecycle", fake_copa_lifecycle)
+    monkeypatch.setattr(orch, "resolve_build_instance", lambda _cfg: "i-test")
+    monkeypatch.setattr(orch, "finalize_hardening_run", lambda *a, **k: None)
+    monkeypatch.setattr(orch, "CopaPatchStrategy", lambda **_k: object())
+
+    orch.run_hardening(
+        run_id=1,
+        source_image_ref="img:latest",
+        target_registry="r/repo",
+        published_tag="v1",
+        auto_sign=False,
+        mode=orch.MODE_PATCH,
+        dockerfile_path="/opt/image-forge-src/image-forge/base-images/vuln-python-sample/Dockerfile",
+        build_directory="/opt/image-forge-src/image-forge/base-images/vuln-python-sample",
+        sb=_FakeSB(),
+        config=HardeningConfig(build_instance_id="i-test"),
+    )
+    assert captured["build_directory"].endswith("vuln-python-sample")
+    assert captured["dockerfile_path"].endswith("vuln-python-sample/Dockerfile")
 
 
 # --- decide-from-findings lifecycle (full-scope gate) edge cases ---

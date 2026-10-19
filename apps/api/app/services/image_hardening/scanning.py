@@ -318,6 +318,80 @@ def parse_box_residual_counts(stdout: str) -> dict:
     }
 
 
+# Marker for the compact lang-pkgs (dependency) findings the box prints for the
+# dependency-bump leg.
+_DEPS_MARKER = "__HARDEN_DEPS__"
+
+
+def box_deps_report_command(report_path: str) -> str:
+    """Return a shell command that extracts ONLY the lang-pkgs (dependency)
+    findings from a trivy report ON THE BOX, as a compact `{"Results": [...]}`
+    JSON printed after a marker.
+
+    WHY: the dependency-bump leg feeds trivy findings to `compute_pip_bumps`,
+    which reads Results[].Vulnerabilities[] (Class/Type/PkgName/FixedVersion/
+    Severity/VulnerabilityID). The full report is multi-MB and `cat`-ing it over
+    SSM stdout truncates at ~24 KB (the same trap fixed elsewhere). The lang-pkgs
+    SUBSET — only the fields the bumper needs — is tiny, so we emit just that.
+    The emitted JSON keeps the SAME SHAPE compute_pip_bumps expects, so that
+    pure function needs no change.
+
+    Emits:
+        __HARDEN_DEPS__ {"ok": true, "report": {"Results": [ {Class, Type,
+                         Vulnerabilities:[{PkgName, FixedVersion, Severity,
+                         VulnerabilityID}, ...]}, ... ]}}
+    or on failure:
+        __HARDEN_DEPS__ {"ok": false, "error": "..."}
+    """
+    py = (
+        "import json,sys\n"
+        "p=sys.argv[1]; mk=sys.argv[2]\n"
+        "try:\n"
+        "    d=json.load(open(p))\n"
+        "except Exception as e:\n"
+        "    print(mk+' '+json.dumps({'ok':False,'error':'read/parse: '+str(e)[:200]}))\n"
+        "    sys.exit(0)\n"
+        "results=[]\n"
+        "for r in (d.get('Results') or []):\n"
+        "    if (r.get('Class') or '').strip()!='lang-pkgs': continue\n"
+        "    vulns=[]\n"
+        "    for v in (r.get('Vulnerabilities') or []):\n"
+        "        vulns.append({'PkgName':v.get('PkgName'),"
+        "'FixedVersion':v.get('FixedVersion'),'Severity':v.get('Severity'),"
+        "'VulnerabilityID':v.get('VulnerabilityID')})\n"
+        "    results.append({'Class':r.get('Class'),'Type':r.get('Type'),"
+        "'Vulnerabilities':vulns})\n"
+        "print(mk+' '+json.dumps({'ok':True,'report':{'Results':results}}))\n"
+    )
+    return f"python3 - '{report_path}' '{_DEPS_MARKER}' <<'__HARDEN_DEPS_EOF__'\n{py}__HARDEN_DEPS_EOF__"
+
+
+def parse_box_deps_report(stdout: str) -> str:
+    """Parse the compact lang-pkgs report emitted by `box_deps_report_command`.
+
+    Returns the report as a JSON STRING (same shape compute_pip_bumps expects),
+    so callers can pass it straight through. HARD-FAILS (ScanParseError) on
+    missing/malformed output or ok=false — a silent empty report would make the
+    bumper think there are no dependency fixes when there may be.
+    """
+    if not stdout:
+        raise ScanParseError("empty deps output from build box")
+    line = None
+    for ln in stdout.splitlines():
+        if ln.startswith(_DEPS_MARKER):
+            line = ln[len(_DEPS_MARKER) :].strip()
+            break
+    if line is None:
+        raise ScanParseError(f"no deps marker in box output: {stdout[:200]!r}")
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError) as e:
+        raise ScanParseError(f"deps payload not valid JSON: {e}: {line[:200]!r}") from e
+    if not obj.get("ok"):
+        raise ScanParseError(f"box could not extract deps report: {obj.get('error')!r}")
+    return json.dumps(obj.get("report") or {"Results": []})
+
+
 def classify_trivy_report(report_json: str) -> ScanClassification:
     """Parse a full-scope trivy JSON report (as a STRING) into fixable crit/high.
 

@@ -107,6 +107,7 @@ def run_hardening(
     sb: Any,
     mode: str = MODE_PATCH,
     dockerfile_path: str | None = None,
+    build_directory: str | None = None,
     config: HardeningConfig | None = None,
 ) -> int:
     """Run the pipeline for an ALREADY-CREATED hardening_runs row.
@@ -147,6 +148,7 @@ def run_hardening(
         sbom_bucket=cfg.sbom_bucket or None,
         auto_sign=auto_sign,
         dockerfile_path=dockerfile_path,
+        build_directory=build_directory,
     )
     started_at = utcnow()
 
@@ -574,32 +576,45 @@ def _run_rebuild_leg(copa, ctx, cfg, current_ref):
         return r.exit_code == 0
 
     # --- Option b: deterministic pip dependency bump before rebuild ---
-    # 1. Full-scope scan of the CURRENT image to a report file we can read back.
+    # 1. Scan the CURRENT image for library findings, then extract ONLY the
+    #    lang-pkgs subset ON THE BOX (compact JSON). We do NOT `cat` the full
+    #    report through SSM stdout — that truncates at ~24 KB and would feed
+    #    compute_pip_bumps a partial report (same trap fixed elsewhere).
+    from .scanning import box_deps_report_command, parse_box_deps_report  # noqa: PLC0415
+
     scratch = cfg.copa_scratch_dir
     report_path = f"{scratch}/trivy-deps-{ctx.hardening_run_id}.json"
     req_path = f"{wd.rstrip('/')}/{cfg.requirements_filename}"
 
     scan_cmd = (
-        f"trivy image --vuln-type library --ignore-unfixed -f json "
-        f"-o '{report_path}' {current_ref} && cat '{report_path}'"
+        f"trivy image --pkg-types library --ignore-unfixed -f json "
+        f"-o '{report_path}' {current_ref} && {box_deps_report_command(report_path)}"
     )
     start = utcnow()
-    report_json = "{}"
+    report_json = '{"Results": []}'
     try:
         r = copa._run(executor, scan_cmd, workdir=scratch, timeout_s=600)  # noqa: SLF001
-        report_json = r.stdout or "{}"
+        parse_failed = False
+        if r.exit_code == 0:
+            try:
+                report_json = parse_box_deps_report(r.stdout or "")
+            except Exception:  # noqa: BLE001
+                parse_failed = True
         steps.append(
             StepResult(
                 step_num=20,
                 action="scan deps (for bump)",
                 command=scan_cmd,
-                exit_code=r.exit_code,
-                status="success" if r.exit_code == 0 else "failed",
+                stderr=(r.stderr or "")[:1000] if (r.exit_code or parse_failed) else "",
+                exit_code=r.exit_code if not parse_failed else 1,
+                status="success" if (r.exit_code == 0 and not parse_failed) else "failed",
                 started_at=start,
                 finished_at=utcnow(),
                 ssm_command_id=r.ssm_command_id,
             )
         )
+        if r.exit_code != 0 or parse_failed:
+            return steps, current_ref
     except Exception as e:  # noqa: BLE001
         steps.append(
             StepResult(
