@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24000",
+  "scanner": "serverless-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 24000,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "PartiQL injection via f-string. Use parameterized queries with Parameters argument.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-sql-injection",
+    "end_line": 64,
+    "metadata": {
+      "cwe": [
+        "CWE-89"
+      ],
+      "owasp": [
+        "A03:2021 - Injection"
+      ]
+    },
+    "severity": "ERROR",
+    "start_line": 63
+  }
+}

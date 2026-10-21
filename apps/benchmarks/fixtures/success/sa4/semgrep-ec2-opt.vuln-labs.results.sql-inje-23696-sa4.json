@@ -1,0 +1,61 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.sql-inje-23696-sa4",
+  "scanner": "semgrep-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture semgrep-ec2-opt.vuln-labs.results.sql-inje-23696 + remediation_package #2428.",
+  "source_issue_id": 19349,
+  "source_package_id": 2428,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the source file before making any edits.\n\nCommand:\n    cp /opt/vuln-labs/appsec-lab/app.py /opt/vuln-labs/appsec-lab/app.py.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: OWASP recommends maintaining the ability to rollback any security fix to the pre-fix state in case the change introduces functional regressions.",
+          "source": "OWASP Secure Coding Practices",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/Secure_Coding_Practices-Quick_Reference_Guide.html"
+        },
+        {
+          "step": "Replace the vulnerable SQL query in the login function with a parameterized query to prevent SQL injection.\n\nCommand:\n  #EDIT_FILE\n  {\"path\": \"/opt/vuln-labs/appsec-lab/app.py\",\n   \"old_text\": \"query = (f\\\"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'\\\")\",\n   \"new_text\": \"query = \\\"SELECT * FROM users WHERE username = ? AND password = ?\\\"\\ncursor = conn.execute(query, (username, password))\"}\n\nWhy: Using parameterized queries prevents SQL injection by separating SQL logic from user-supplied data, ensuring that the database driver handles escaping.",
+          "source": "OWASP SQL Injection Prevention Cheat Sheet",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        },
+        {
+          "step": "Replace the vulnerable SQL query in the search function with a parameterized query.\n\nCommand:\n  #EDIT_FILE\n  {\"path\": \"/opt/vuln-labs/appsec-lab/app.py\",\n   \"old_text\": \"query = \\\"SELECT * FROM users WHERE username LIKE '%\" + term + \"%'\\\"\",\n   \"new_text\": \"query = \\\"SELECT * FROM users WHERE username LIKE ?\\\"\\ncursor = conn.execute(query, ('%' + term + '%',))\"}\n\nWhy: Parameterized queries ensure that user input is treated as data, not executable code, preventing SQL injection.",
+          "source": "OWASP SQL Injection Prevention Cheat Sheet",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        },
+        {
+          "step": "Replace the vulnerable SQL query in the get_user function with a parameterized query.\n\nCommand:\n  #EDIT_FILE\n  {\"path\": \"/opt/vuln-labs/appsec-lab/app.py\",\n   \"old_text\": \"cursor = conn.execute(\\\"SELECT * FROM users WHERE id = \\\" + user_id)\",\n   \"new_text\": \"query = \\\"SELECT * FROM users WHERE id = ?\\\"\\ncursor = conn.execute(query, (user_id,))\"}\n\nWhy: Parameterized queries prevent SQL injection by ensuring that user input is treated as data, not executable code.",
+          "source": "OWASP SQL Injection Prevention Cheat Sheet",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        },
+        {
+          "step": "Replace the vulnerable SQL query in the delete_user function with a parameterized query.\n\nCommand:\n  #EDIT_FILE\n  {\"path\": \"/opt/vuln-labs/appsec-lab/app.py\",\n   \"old_text\": \"conn.execute(f\\\"DELETE FROM users WHERE id = '{user_id}'\\\")\",\n   \"new_text\": \"query = \\\"DELETE FROM users WHERE id = ?\\\"\\nconn.execute(query, (user_id,))\"}\n\nWhy: Using parameterized queries ensures that user input is handled safely, preventing SQL injection.",
+          "source": "OWASP SQL Injection Prevention Cheat Sheet",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        },
+        {
+          "step": "Verify that all vulnerable SQL patterns are no longer present in the file.\n\nCommand:\n  #VERIFY_ABSENT\n  {\"path\": \"/opt/vuln-labs/appsec-lab/app.py\",\n   \"pattern\": \"f\\\"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'\\\"\"}\n\nWhy: Ensures that the vulnerable pattern has been completely removed from the source code.",
+          "source": "OWASP SQL Injection Prevention Cheat Sheet",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+        },
+        {
+          "step": "Perform a syntax check to ensure the code is still valid after the edits.\n\nCommand:\n    python3 -m py_compile /opt/vuln-labs/appsec-lab/app.py\n\nWhy: Syntax checking ensures that the code changes have not introduced any syntax errors, maintaining the application's functionality.",
+          "source": "Python Documentation",
+          "source_url": "https://docs.python.org/3/library/py_compile.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 19349,
+      "source_vuln_id": "opt.vuln-labs.results.sql-injection-fstring-variable",
+      "title": "SQL injection via string formatting in variable. Use parameterized queries.",
+      "severity": "High",
+      "asset_identity": {
+        "file": "/opt/vuln-labs/appsec-lab/app.py",
+        "line": 43,
+        "project": "/opt/vuln-labs/appsec-lab/app.py"
+      }
+    }
+  }
+}

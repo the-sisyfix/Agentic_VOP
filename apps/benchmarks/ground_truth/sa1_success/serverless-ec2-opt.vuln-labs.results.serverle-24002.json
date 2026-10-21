@@ -1,0 +1,11 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24002",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "serverless-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.serverless-insecure-deserialization",
+    "severity": "high",
+    "title_contains": "insecure",
+    "description_present": true
+  }
+}

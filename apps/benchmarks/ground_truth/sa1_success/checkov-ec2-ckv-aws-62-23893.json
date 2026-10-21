@@ -1,0 +1,10 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-62-23893",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "checkov-ec2",
+    "source_vuln_id": "CKV_AWS_62",
+    "severity": "medium",
+    "description_present": true
+  }
+}

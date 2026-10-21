@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.lambda-r-25356",
+  "scanner": "serverless-ec2",
+  "source_raw_finding_id": 25356,
+  "pinned_at": "2026-09-17T02:48:19.813897+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/main.tf",
+    "message": "IAM role allows any AWS principal to assume it. Restrict to lambda.amazonaws.com service.\n",
+    "rule_id": "opt.vuln-labs.results.lambda-role-wildcard-assume",
+    "end_line": 65,
+    "metadata": {
+      "cwe": [
+        "CWE-269"
+      ],
+      "owasp": [
+        "A01:2021 - Broken Access Control"
+      ]
+    },
+    "severity": "ERROR",
+    "start_line": 65
+  }
+}

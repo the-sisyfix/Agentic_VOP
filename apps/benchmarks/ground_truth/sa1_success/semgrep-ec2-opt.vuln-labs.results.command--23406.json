@@ -1,0 +1,11 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.command--23406",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "semgrep-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.command-injection-subprocess-shell",
+    "severity": "high",
+    "title_contains": "command",
+    "description_present": true
+  }
+}

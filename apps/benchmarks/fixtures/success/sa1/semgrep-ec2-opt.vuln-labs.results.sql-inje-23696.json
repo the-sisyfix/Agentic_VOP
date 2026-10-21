@@ -1,0 +1,24 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.sql-inje-23696",
+  "scanner": "semgrep-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 23696,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/appsec-lab/app.py",
+    "message": "SQL injection via string formatting in variable. Use parameterized queries.\n",
+    "rule_id": "opt.vuln-labs.results.sql-injection-fstring-variable",
+    "end_line": 46,
+    "metadata": {
+      "cwe": [
+        "CWE-89"
+      ],
+      "owasp": [
+        "A03:2021 - Injection"
+      ],
+      "confidence": "HIGH"
+    },
+    "severity": "ERROR",
+    "start_line": 43
+  }
+}

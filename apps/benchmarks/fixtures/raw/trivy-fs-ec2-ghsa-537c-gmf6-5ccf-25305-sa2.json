@@ -1,0 +1,41 @@
+{
+  "fixture_id": "trivy-fs-ec2-ghsa-537c-gmf6-5ccf-25305-sa2",
+  "scanner": "trivy-fs-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture trivy-fs-ec2-ghsa-537c-gmf6-5ccf-25305.",
+  "source_issue_id": 21852,
+  "input": {
+    "issue": {
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "GHSA-537c-gmf6-5ccf",
+      "title": "Vulnerable OpenSSL included in cryptography wheels",
+      "description": "pyca/cryptography's wheels include a statically linked copy of OpenSSL. The versions of OpenSSL included in wheels prior to cryptograph 48.01 are vulnerable to a security issue. More details about the vulnerability itself can be found in https://openssl-library.org/news/secadv/20260609.txt.\n\nIf you are building cryptography source (\"sdist\") then you are responsible for upgrading your copy of OpenSSL. Only users installing from wheels built by the cryptography project (i.e., those distributed on PyPI) need to update their cryptography versions.",
+      "asset_identity": {
+        "project": "requirements.txt"
+      },
+      "package": {
+        "name": "cryptography",
+        "version": "2.6"
+      }
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-289-23890-sa4",
+  "scanner": "checkov-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv-aws-289-23890 + remediation_package #2482.",
+  "source_issue_id": 19604,
+  "source_package_id": 2482,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the current Terraform file to ensure changes can be reverted if necessary.\n\nCommand:\n    cp /opt/vuln-labs/cspm-lab/main.tf /opt/vuln-labs/cspm-lab/main.tf.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: Creating a backup allows for easy rollback in case the changes need to be reverted.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Modify the IAM policy to restrict permissions by implementing least privilege principles.\n\nCommand:\n    sed -i 's/\"Action\": \"s3:GetObject\"/\"Action\": \"s3:GetObject\", \"s3:PutObject\"/' /opt/vuln-labs/cspm-lab/main.tf\n\nWhy: Restricting permissions to specific actions and resources reduces the risk of unauthorized access and aligns with security best practices.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Plan the Terraform changes to ensure the modifications are correct and will be applied as expected.\n\nCommand:\n    cd /opt/vuln-labs/cspm-lab && terraform plan -detailed-exitcode\n\nWhy: Running a plan allows you to verify that the changes are correct and will not cause any unexpected issues.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Apply the Terraform changes to enforce the updated IAM policy.\n\nCommand:\n    terraform apply -auto-approve\n\nWhy: Applying the changes updates the IAM policy to enforce the least privilege principle, reducing security risks.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Verify the IAM policy changes by checking the policy document.\n\nCommand:\n    aws iam get-policy-version --policy-arn arn:aws:iam::aws:policy/vulnerable_policy --version-id v1\n\nWhy: Verifying the policy ensures that the changes have been applied correctly and the policy now adheres to least privilege principles.",
+          "source": "AWS Security Best Practices in IAM",
+          "source_url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
+        },
+        {
+          "step": "Re-scan with Checkov to confirm CKV_AWS_289 no longer fails.\n\nCommand:\n    checkov -d /opt/vuln-labs/cspm-lab --check CKV_AWS_289 --output json --quiet --compact\n\nWhy: Re-scanning with Checkov verifies that the vulnerability has been remediated according to the scanner's criteria.",
+          "source": "Checkov CLI Reference",
+          "source_url": "https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 19604,
+      "source_vuln_id": "CKV_AWS_289",
+      "title": "Ensure IAM policies does not allow permissions management / resource exposure without constraints",
+      "severity": "Medium",
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_iam_policy.vulnerable_policy"
+      }
+    }
+  }
+}

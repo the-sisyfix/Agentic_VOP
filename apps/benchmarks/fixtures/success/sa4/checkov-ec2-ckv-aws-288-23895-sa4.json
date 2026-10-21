@@ -1,0 +1,56 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-288-23895-sa4",
+  "scanner": "checkov-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv-aws-288-23895 + remediation_package #2478.",
+  "source_issue_id": 19600,
+  "source_package_id": 2478,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the current Terraform file to ensure changes can be reverted if necessary.\n\nCommand:\n    cp /opt/vuln-labs/cspm-lab/main.tf /opt/vuln-labs/cspm-lab/main.tf.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: Backing up the file allows for easy rollback in case the changes need to be undone.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Update the IAM policy to remove overly permissive actions and implement least privilege.\n\nCommand:\n    sed -i 's/Action   = \"s3:ListBucket\"/Action   = \"s3:GetObject\"/' /opt/vuln-labs/cspm-lab/main.tf\n\nWhy: Restricting the IAM policy to specific actions reduces the risk of unauthorized data access.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Plan the Terraform changes to ensure the updated policy is correctly configured.\n\nCommand:\n    cd /opt/vuln-labs/cspm-lab && terraform plan -detailed-exitcode\n\nWhy: Planning the changes allows for verification of the intended updates before applying them.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Apply the Terraform changes to update the IAM policy in the AWS environment.\n\nCommand:\n    terraform apply -auto-approve\n\nWhy: Applying the changes updates the IAM policy to enforce the principle of least privilege.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Verify the IAM policy changes using Checkov to ensure the vulnerability is resolved.\n\nCommand:\n    checkov -d /opt/vuln-labs/cspm-lab --check CKV_AWS_288 --output json --quiet --compact\n\nWhy: Re-scanning with Checkov confirms that the policy no longer violates security best practices.",
+          "source": "Checkov CLI Reference",
+          "source_url": "https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html"
+        },
+        {
+          "step": "Review the IAM policy to ensure no other overly permissive actions remain.\n\nCommand:\n    grep 'Action' /opt/vuln-labs/cspm-lab/main.tf\n\nWhy: Ensuring no other overly permissive actions remain helps maintain a secure IAM policy.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 19600,
+      "source_vuln_id": "CKV_AWS_288",
+      "title": "Ensure IAM policies does not allow data exfiltration",
+      "severity": "Medium",
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_iam_policy.vulnerable_policy"
+      }
+    }
+  }
+}

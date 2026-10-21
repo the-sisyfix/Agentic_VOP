@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.lambda-n-25361",
+  "scanner": "serverless-ec2",
+  "source_raw_finding_id": 25361,
+  "pinned_at": "2026-09-17T02:48:19.813897+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/main.tf",
+    "message": "Lambda function has no dead letter queue configured. Failed events will be lost.\n",
+    "rule_id": "opt.vuln-labs.results.lambda-no-dlq",
+    "end_line": 147,
+    "metadata": {
+      "cwe": [
+        "CWE-392"
+      ],
+      "owasp": [
+        "A05:2021 - Security Misconfiguration"
+      ]
+    },
+    "severity": "WARNING",
+    "start_line": 118
+  }
+}

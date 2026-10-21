@@ -1,0 +1,46 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.insecure-23419-sa4",
+  "scanner": "semgrep-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture semgrep-ec2-opt.vuln-labs.results.insecure-23419 + remediation_package #2342.",
+  "source_issue_id": 18969,
+  "source_package_id": 2342,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the source file before making any edits.\n\nCommand:\n    cp /opt/vuln-labs/appsec-lab/utils.py /opt/vuln-labs/appsec-lab/utils.py.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: Backing up the file ensures that you can restore the original state if the changes introduce any issues.",
+          "source": "OWASP Secure Coding Practices",
+          "source_url": "https://owasp.org/www-community/vulnerabilities/Insecure_Deserialization"
+        },
+        {
+          "step": "Replace the use of pickle.loads with json.loads to safely deserialize the session data.\n\nCommand:\n    #EDIT_FILE\n    {\"path\": \"/opt/vuln-labs/appsec-lab/utils.py\",\n     \"old_text\": \"session_obj = pickle.loads(decoded)\",\n     \"new_text\": \"import json\\nsession_obj = json.loads(decoded)\"}\n\nWhy: Using json.loads instead of pickle.loads mitigates the risk of arbitrary code execution by limiting the deserialization to JSON-compatible data types.",
+          "source": "Snyk Guide to Python Pickle",
+          "source_url": "https://snyk.io/blog/guide-to-python-pickle/"
+        },
+        {
+          "step": "Verify that the vulnerable pattern is removed from the file.\n\nCommand:\n    #VERIFY_ABSENT\n    {\"path\": \"/opt/vuln-labs/appsec-lab/utils.py\",\n     \"pattern\": \"pickle.loads\"}\n\nWhy: Ensuring the absence of the vulnerable pattern confirms that the insecure deserialization method is no longer used.",
+          "source": "OWASP Insecure Deserialization Prevention",
+          "source_url": "https://owasp.org/www-project-top-ten/2017/A8_2017-Insecure_Deserialization"
+        },
+        {
+          "step": "Perform a syntax check to ensure the file is still valid Python code after the edit.\n\nCommand:\n    python3 -m py_compile /opt/vuln-labs/appsec-lab/utils.py\n\nWhy: Running a syntax check helps catch any syntax errors introduced during the code modification.",
+          "source": "Python Official Documentation",
+          "source_url": "https://docs.python.org/3/library/py_compile.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 18969,
+      "source_vuln_id": "opt.vuln-labs.results.insecure-deserialization-pickle",
+      "title": "Insecure deserialization \u2014 pickle.loads on potentially untrusted data.",
+      "severity": "High",
+      "asset_identity": {
+        "file": "/opt/vuln-labs/appsec-lab/utils.py",
+        "line": 13,
+        "project": "/opt/vuln-labs/appsec-lab/utils.py"
+      }
+    }
+  }
+}

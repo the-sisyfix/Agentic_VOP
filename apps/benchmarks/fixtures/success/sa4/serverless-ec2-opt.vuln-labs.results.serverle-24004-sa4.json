@@ -1,0 +1,46 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24004-sa4",
+  "scanner": "serverless-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-24004 + remediation_package #2544.",
+  "source_issue_id": 19795,
+  "source_package_id": 2544,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the source file before making any edits.\n\nCommand:\n    cp /opt/vuln-labs/serverless-lab/lambda_function.py /opt/vuln-labs/serverless-lab/lambda_function.py.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: OWASP recommends maintaining the ability to rollback any security fix to the pre-fix state in case the change introduces functional regressions.",
+          "source": "OWASP Secure Coding Practices",
+          "source_url": "https://cheatsheetseries.owasp.org/cheatsheets/Secure_Coding_Practices-Quick_Reference_Guide.html"
+        },
+        {
+          "step": "Replace the weak random token generation with a secure method using the secrets module.\n\nCommand:\n  #EDIT_FILE\n  {\"path\": \"/opt/vuln-labs/serverless-lab/lambda_function.py\",\n   \"old_text\": \"token = secrets.token_hex(16)\",\n   \"new_text\": \"token = secrets.token_urlsafe(16)\"}\n\nWhy: The secrets module provides cryptographically strong random numbers suitable for security purposes, ensuring that tokens are unpredictable.",
+          "source": "Python Secrets Module Documentation",
+          "source_url": "https://blog.miguelgrinberg.com/post/the-new-way-to-generate-secure-tokens-in-python"
+        },
+        {
+          "step": "Verify that the vulnerable pattern is no longer present in the file.\n\nCommand:\n  #VERIFY_ABSENT\n  {\"path\": \"/opt/vuln-labs/serverless-lab/lambda_function.py\",\n   \"pattern\": \"random\"}\n\nWhy: Ensuring the absence of the vulnerable pattern confirms that the insecure token generation method has been fully removed.",
+          "source": "Python Secrets Module Documentation",
+          "source_url": "https://blog.miguelgrinberg.com/post/the-new-way-to-generate-secure-tokens-in-python"
+        },
+        {
+          "step": "Run a syntax check to ensure the code is still valid after the edit.\n\nCommand:\n    python3 -m py_compile /opt/vuln-labs/serverless-lab/lambda_function.py\n\nWhy: Syntax checking ensures that the code changes did not introduce any syntax errors, maintaining the application's functionality.",
+          "source": "Python Documentation",
+          "source_url": "https://docs.python.org/3/library/py_compile.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 19795,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-weak-random",
+      "title": "Weak randomness in Lambda handler. Use secrets module for security tokens.",
+      "severity": "Medium",
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 124,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      }
+    }
+  }
+}

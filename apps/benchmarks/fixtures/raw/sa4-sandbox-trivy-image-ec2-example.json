@@ -1,0 +1,9 @@
+{
+  "fixture_id": "sa4-sandbox-trivy-image-ec2-example",
+  "scanner": "trivy-image-ec2",
+  "agent": "sa4_sandbox",
+  "notes": "SA-4 end-to-end sandbox-oracle fixture. REQUIRES: an existing demo.remediation_packages row with the given package_id and a valid recommended_pathway (produced by a normal SA-3 demo run). Replace package_id with a real pinned one from your DB before running. Running this dispatches real SSM commands against env2.",
+  "input": {
+    "package_id": 3399
+  }
+}

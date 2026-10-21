@@ -1,0 +1,11 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.sql-inje-23696",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "semgrep-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.sql-injection-fstring-variable",
+    "severity": "high",
+    "title_contains": "injection",
+    "description_present": true
+  }
+}

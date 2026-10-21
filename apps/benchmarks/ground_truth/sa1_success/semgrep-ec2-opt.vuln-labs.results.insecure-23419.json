@@ -1,0 +1,11 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.insecure-23419",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "semgrep-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.insecure-deserialization-pickle",
+    "severity": "high",
+    "title_contains": "insecure",
+    "description_present": true
+  }
+}

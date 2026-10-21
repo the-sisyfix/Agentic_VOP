@@ -1,0 +1,26 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.lambda-r-25356-sa3",
+  "scanner": "serverless-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.lambda-r-25356.",
+  "source_issue_id": 21913,
+  "input": {
+    "issue": {
+      "id": 21913,
+      "source": "serverless-ec2",
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.lambda-role-wildcard-assume",
+      "title": "IAM role allows any AWS principal to assume it. Restrict to lambda.amazonaws.com service.",
+      "description": null,
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/main.tf",
+        "line": 65,
+        "project": "/opt/vuln-labs/serverless-lab/main.tf"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

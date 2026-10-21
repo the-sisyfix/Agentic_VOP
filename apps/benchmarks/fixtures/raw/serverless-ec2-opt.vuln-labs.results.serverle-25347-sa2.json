@@ -1,0 +1,40 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-25347-sa2",
+  "scanner": "serverless-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-25347.",
+  "source_issue_id": 21907,
+  "input": {
+    "issue": {
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-hardcoded-secret",
+      "title": "Hardcoded credential in Lambda source code. Use environment variables or Secrets Manager.",
+      "description": null,
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 20,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "checkov-ec2": "checkov-ec2-ckv-aws-289-23890",
+  "semgrep-ec2": "semgrep-ec2-opt.vuln-labs.results.hardcode-23417",
+  "serverless-ec2": "serverless-ec2-opt.vuln-labs.results.serverle-23999",
+  "trivy-fs-ec2": "trivy-fs-ec2-cve-2020-28493-23391",
+  "trivy-image-ec2": "trivy-image-ec2-cve-2021-23841-24288",
+  "trivy-image-java-ec2": "trivy-image-java-ec2-cve-2019-5482-24132",
+  "trivy-image-python-ec2": "trivy-image-python-ec2-cve-2021-25289-24172",
+  "trivy-os-al2-ec2": "trivy-os-al2-ec2-cve-2023-1972-20081",
+  "trivy-os-ec2": "trivy-os-ec2-cve-2023-3297-24208"
+}

@@ -1,0 +1,56 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-62-23893-sa4",
+  "scanner": "checkov-ec2",
+  "agent": "sa4",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv-aws-62-23893 + remediation_package #2476.",
+  "source_issue_id": 19598,
+  "source_package_id": 2476,
+  "input": {
+    "pathway": {
+      "remediation_steps": [
+        {
+          "step": "Back up the current Terraform file to ensure changes can be reverted if necessary.\n\nCommand:\n    cp /opt/vuln-labs/cspm-lab/main.tf /opt/vuln-labs/cspm-lab/main.tf.bak-$(date +%Y%m%d-%H%M%S)\n\nWhy: Backing up the file allows for easy rollback in case of errors during the remediation process.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Edit the IAM policy in the Terraform file to replace wildcard actions with specific actions.\n\nCommand:\n    sed -i 's/\"Action\": \"s3:ListBucket\"/\"Action\": \"s3:GetObject\"/' /opt/vuln-labs/cspm-lab/main.tf\n\nWhy: Replacing wildcard actions with specific actions reduces the risk of unauthorized access by adhering to the principle of least privilege.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Run Terraform plan to preview the changes and ensure they are correct before applying.\n\nCommand:\n    cd /opt/vuln-labs/cspm-lab && terraform plan -detailed-exitcode\n\nWhy: Terraform plan allows you to verify that the changes will be applied as intended without any errors.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Apply the changes using Terraform to update the IAM policy.\n\nCommand:\n    terraform apply -auto-approve\n\nWhy: Applying the changes updates the IAM policy to enforce the least privilege principle.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Verify the IAM policy changes by checking the policy version.\n\nCommand:\n    POLICY_ARN=$(terraform state show aws_iam_policy.vulnerable_policy | awk -F'\"' '/arn:aws:iam::/{print $2; exit}') && aws iam get-policy-version --policy-arn \"$POLICY_ARN\" --version-id v1\n\nWhy: Verifying the policy ensures that the changes have been applied correctly and the policy adheres to the least privilege principle.",
+          "source": "AWS Security Hub User Guide",
+          "source_url": "https://docs.aws.amazon.com/securityhub/latest/userguide/exposure-iam-user.html"
+        },
+        {
+          "step": "Re-scan with Checkov to confirm that the IAM policy no longer fails the CKV_AWS_62 check.\n\nCommand:\n    checkov -d /opt/vuln-labs/cspm-lab/ --check CKV_AWS_62 --output json --quiet --compact\n\nWhy: Re-scanning with Checkov provides authoritative proof that the vulnerability has been remediated.",
+          "source": "Checkov Policy Index",
+          "source_url": "https://www.checkov.io/5.Policy%20Index/all.html"
+        }
+      ]
+    },
+    "snapshot_text": "ENV2 SNAPSHOT (benchmark stub):\n  - target file present\n  - docker daemon reachable (v26.1.3)\n  - trivy present (v0.74.0)\n  - no destructive patterns pre-flagged",
+    "issue": {
+      "id": 19598,
+      "source_vuln_id": "CKV_AWS_62",
+      "title": "Ensure IAM policies that allow full \"*-*\" administrative privileges are not created",
+      "severity": "Medium",
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_iam_policy.vulnerable_policy"
+      }
+    }
+  }
+}

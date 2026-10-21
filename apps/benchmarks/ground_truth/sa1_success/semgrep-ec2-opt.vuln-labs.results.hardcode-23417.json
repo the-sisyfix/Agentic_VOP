@@ -1,0 +1,11 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.hardcode-23417",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "semgrep-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.hardcoded-secret-key",
+    "severity": "medium",
+    "title_contains": "hardcoded",
+    "description_present": true
+  }
+}

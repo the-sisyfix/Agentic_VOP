@@ -1,0 +1,18 @@
+{
+  "fixture_id": "trivy-image-java-ec2-dla-3112-1-24874",
+  "scanner": "trivy-image-java-ec2",
+  "source_raw_finding_id": 24874,
+  "pinned_at": "2026-09-05T21:15:49.156694+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "type": "debian",
+    "title": "bzip2 - bugfix update",
+    "target": "vuln-java-image:latest (debian 10.2)",
+    "vuln_id": "DLA-3112-1",
+    "pkg_name": "bzip2",
+    "severity": "UNKNOWN",
+    "description": null,
+    "fixed_version": "1.0.6-9.2~deb10u2",
+    "installed_version": "1.0.6-9.2~deb10u1"
+  }
+}

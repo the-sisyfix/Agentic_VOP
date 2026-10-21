@@ -1,0 +1,23 @@
+{
+  "fixture_id": "master-trivy-image-ec2-sample",
+  "scanner": "n/a",
+  "agent": "master",
+  "notes": "Master planning fixture — simulates the trigger payload that arrives when a user kicks off a run against trivy-image-ec2. Hand-crafted; replace with real pinned triggers via fixture-picker when ready.",
+  "input": {
+    "trigger": {
+      "event_id": "EVT-BENCH-MASTER-001",
+      "action": "FULL",
+      "persona": "security-admin",
+      "targets": {
+        "scanners": ["trivy-image-ec2"],
+        "demo": true
+      }
+    },
+    "available_tools": [
+      "sub-agent-1",
+      "sub-agent-2",
+      "sub-agent-3",
+      "sub-agent-4"
+    ]
+  }
+}

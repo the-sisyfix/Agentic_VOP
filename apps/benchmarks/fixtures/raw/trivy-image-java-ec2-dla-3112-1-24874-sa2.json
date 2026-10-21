@@ -1,0 +1,41 @@
+{
+  "fixture_id": "trivy-image-java-ec2-dla-3112-1-24874-sa2",
+  "scanner": "trivy-image-java-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture trivy-image-java-ec2-dla-3112-1-24874.",
+  "source_issue_id": 21167,
+  "input": {
+    "issue": {
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "DLA-3112-1",
+      "title": "bzip2 - bugfix update",
+      "description": null,
+      "asset_identity": {
+        "name": "vuln-java-image:latest (debian 10.2)"
+      },
+      "package": {
+        "name": "bzip2",
+        "version": "1.0.6-9.2~deb10u1"
+      }
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}
