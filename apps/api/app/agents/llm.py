@@ -30,11 +30,307 @@ import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from ..config import settings
+
+
+# =============================================================================
+# Transparent Anthropic prompt-caching
+# =============================================================================
+# Anthropic's prompt-caching feature (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)
+# charges 10% of normal input cost for cached blocks reused within ~5 min.
+# We tag the first large SystemMessage with `cache_control: ephemeral` so the
+# system prompt — reused across every call for a given agent — gets cached.
+#
+# This is TRANSPARENT: the model sees the same prompt and produces the same
+# output, Anthropic just bills less. No downstream behavior changes.
+#
+# Gated by env flag `ANTHROPIC_PROMPT_CACHING` (default "1" = ON). Set to "0"
+# to disable without a code change if the wrapper ever causes issues.
+
+import os as _os  # noqa: PLC0415
+
+_PROMPT_CACHE_MIN_CHARS = 2048  # ~500 tokens; Anthropic's min cacheable size
+_PROMPT_CACHE_ENABLED = _os.environ.get("ANTHROPIC_PROMPT_CACHING", "1") == "1"
+
+
+def _mark_system_cacheable(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Mark the first large SystemMessage with Anthropic's cache_control hint.
+
+    Returns a new message list — never mutates the caller's. If no message
+    qualifies (too short, no SystemMessage, or already a list-of-blocks),
+    returns the input unchanged.
+    """
+    if not _PROMPT_CACHE_ENABLED or not messages:
+        return messages
+    out: list[BaseMessage] = []
+    marked = False
+    for m in messages:
+        if (
+            not marked
+            and isinstance(m, SystemMessage)
+            and isinstance(m.content, str)
+            and len(m.content) >= _PROMPT_CACHE_MIN_CHARS
+        ):
+            out.append(
+                SystemMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": m.content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                )
+            )
+            marked = True
+        else:
+            out.append(m)
+    return out
+
+
+class _CachingChatAnthropic(ChatAnthropic):
+    """ChatAnthropic subclass that auto-marks the system prompt as cacheable.
+
+    Overrides `_generate` / `_agenerate` — the lowest-level sync/async hooks
+    that all other paths (`invoke`, `stream`, `batch`, `with_structured_output`)
+    eventually funnel into. Transparent to callers.
+    """
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        return super()._generate(
+            _mark_system_cacheable(messages), stop=stop, run_manager=run_manager, **kwargs
+        )
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        return await super()._agenerate(
+            _mark_system_cacheable(messages), stop=stop, run_manager=run_manager, **kwargs
+        )
+
+
+# =============================================================================
+# Google Gemini — schema flattening + reasoning-content extraction
+# =============================================================================
+# Problem 1: Google's function-declarations API doesn't support JSON-Schema
+# `$ref` / `$defs` (schema references). LangChain's langchain-google-genai
+# silently STRIPS these from Pydantic schemas → Gemini receives an incomplete
+# schema with dangling references → emits malformed output → Pydantic rejects.
+#
+# Problem 2: Gemini 3.1 Pro returns content as a list of blocks with signature
+# wrappers (`[{"type":"text","text":"...","extras":{...}}]`), not a plain
+# string — same pattern as Claude. Our agent_v2 extractor needs the raw text.
+#
+# Fix: wrap ChatGoogleGenerativeAI with a benchmark-safe subclass that
+#   (a) inlines all $defs before structured_output / bind_tools goes to Google
+#   (b) handles the content-list format transparently
+# OpenAI + Anthropic providers are completely untouched.
+
+import copy as _copy  # noqa: PLC0415, E402
+
+
+def _inline_defs(schema: dict) -> dict:
+    """Resolve all #/$defs/* references by inlining the referenced definitions.
+
+    Returns a copy with `$defs` removed and all `$ref` sites replaced with
+    their actual definition. Does NOT mutate the input. Also drops the
+    `additionalProperties: false` key that Google's adapter likewise strips.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    schema = _copy.deepcopy(schema)
+    defs = schema.pop("$defs", {}) or schema.pop("definitions", {}) or {}
+
+    def _resolve(obj):
+        if isinstance(obj, dict):
+            # Drop additionalProperties — Google doesn't support it
+            obj = {k: v for k, v in obj.items() if k != "additionalProperties"}
+            if "$ref" in obj and isinstance(obj["$ref"], str):
+                ref = obj["$ref"]
+                if ref.startswith("#/$defs/"):
+                    name = ref[len("#/$defs/") :]
+                elif ref.startswith("#/definitions/"):
+                    name = ref[len("#/definitions/") :]
+                else:
+                    name = None
+                if name and name in defs:
+                    inlined = _resolve(defs[name])
+                    # Preserve any sibling keys (title, description) on the $ref dict
+                    extras = {k: v for k, v in obj.items() if k != "$ref"}
+                    if isinstance(inlined, dict):
+                        merged = {**inlined, **extras}
+                        return merged
+                    return inlined
+            return {k: _resolve(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_resolve(v) for v in obj]
+        return obj
+
+    return _resolve(schema)
+
+
+_GEMINI_REASONING_HEADROOM = 4000
+"""Gemini 3.x models (flash + pro) consume output tokens on built-in reasoning
+BEFORE emitting any visible text. prompt_db usually sets max_tokens=1000
+which gets fully burned on reasoning → text block comes back empty →
+structured_output returns None. We bump max_output_tokens to this floor
+for Gemini only — production prod agents don't use Google provider so this
+has zero prod impact."""
+
+
+class _SchemaFlatteningChatGoogle(ChatGoogleGenerativeAI):
+    """ChatGoogleGenerativeAI subclass that pre-flattens Pydantic schemas.
+
+    Google's function-declarations API chokes on $defs. This wrapper inlines
+    them BEFORE handing the schema to LangChain's Google adapter.
+
+    Also auto-bumps max_output_tokens to leave reasoning headroom (Gemini 3.x
+    burns a lot of hidden reasoning tokens before writing text).
+
+    Overrides:
+      - `with_structured_output`: if schema is a Pydantic class, convert to
+        a flattened JSON-schema dict first; LangChain accepts both forms.
+      - `bind_tools`: iterates tools and flattens each tool's args_schema.
+
+    Transparent for already-flat schemas (OpenAI/Anthropic callers never
+    reach this class anyway).
+    """
+
+    def __init__(self, *args, **kwargs):
+        # Ensure every Gemini call has enough tokens for reasoning + output
+        current = kwargs.get("max_output_tokens") or 0
+        if current < _GEMINI_REASONING_HEADROOM:
+            kwargs["max_output_tokens"] = _GEMINI_REASONING_HEADROOM
+        super().__init__(*args, **kwargs)
+
+    # ─── 429 retry-with-backoff ──────────────────────────────────────────
+    # gemini-3.1-pro-preview has a tight per-minute RPM tier; SA-3 agentic
+    # bursts (5-10 LLM calls per fixture back-to-back) occasionally trip it
+    # with `RESOURCE_EXHAUSTED` even on paid tiers. Transparent retry here
+    # with linear backoff (60s / 90s / 120s) covers the RPM window reset
+    # without the caller noticing. Only this Google subclass; OpenAI's and
+    # Anthropic's paths are untouched.
+    _GOOGLE_429_MAX_RETRIES = 3
+    _GOOGLE_429_BACKOFF_SECONDS = (60.0, 90.0, 120.0)
+
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        msg = str(exc)
+        return "RESOURCE_EXHAUSTED" in msg or "429" in msg
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        import time as _time  # noqa: PLC0415
+
+        for attempt in range(self._GOOGLE_429_MAX_RETRIES + 1):
+            try:
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+            except Exception as e:  # noqa: BLE001
+                if attempt < self._GOOGLE_429_MAX_RETRIES and self._is_rate_limit_error(e):
+                    _time.sleep(self._GOOGLE_429_BACKOFF_SECONDS[attempt])
+                    continue
+                raise
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+        import asyncio as _asyncio  # noqa: PLC0415
+
+        for attempt in range(self._GOOGLE_429_MAX_RETRIES + 1):
+            try:
+                return await super()._agenerate(
+                    messages, stop=stop, run_manager=run_manager, **kwargs
+                )
+            except Exception as e:  # noqa: BLE001
+                if attempt < self._GOOGLE_429_MAX_RETRIES and self._is_rate_limit_error(e):
+                    await _asyncio.sleep(self._GOOGLE_429_BACKOFF_SECONDS[attempt])
+                    continue
+                raise
+
+    def with_structured_output(self, schema, **kwargs):  # type: ignore[override]
+        # If schema is a Pydantic class, flatten its JSON representation
+        # (Google doesn't support $defs/$ref). Then wrap the inner Runnable
+        # so dict output gets re-validated back into the original Pydantic
+        # instance — callers expecting `.model_dump()` keep working.
+        if hasattr(schema, "model_json_schema"):
+            try:
+                from langchain_core.runnables import RunnableLambda  # noqa: PLC0415
+
+                orig_cls = schema
+                flat_dict = _inline_defs(orig_cls.model_json_schema())
+                flat_dict.setdefault("title", orig_cls.__name__)
+                inner = super().with_structured_output(flat_dict, **kwargs)
+
+                def _parse_stringified_json(value):
+                    """Gemini sometimes serializes nested objects as JSON strings
+                    (e.g. asset_identity='{"file": "..."}' instead of
+                    {"file": "..."}). Recursively try to parse string values
+                    that look like JSON into actual dicts/lists. Leaves
+                    non-JSON strings untouched.
+                    """
+                    import json as _json  # noqa: PLC0415
+
+                    if isinstance(value, str):
+                        s = value.strip()
+                        if (s.startswith("{") and s.endswith("}")) or (
+                            s.startswith("[") and s.endswith("]")
+                        ):
+                            try:
+                                return _parse_stringified_json(_json.loads(s))
+                            except Exception:  # noqa: BLE001
+                                return value
+                        return value
+                    if isinstance(value, dict):
+                        return {k: _parse_stringified_json(v) for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [_parse_stringified_json(v) for v in value]
+                    return value
+
+                def _coerce_to_pydantic(result):
+                    if isinstance(result, dict):
+                        try:
+                            return orig_cls.model_validate(result)
+                        except Exception:  # noqa: BLE001
+                            # Try again after auto-parsing stringified JSON
+                            # for nested object/list fields (Gemini habit).
+                            try:
+                                repaired = _parse_stringified_json(result)
+                                return orig_cls.model_validate(repaired)
+                            except Exception:  # noqa: BLE001
+                                # Validation failed — return None so callers
+                                # consistently see "schema_valid=False" instead
+                                # of a surprise dict. Matches OpenAI/Anthropic
+                                # behavior when structured_output fails.
+                                return None
+                    return result
+
+                return inner | RunnableLambda(_coerce_to_pydantic)
+            except Exception:  # noqa: BLE001, S110
+                pass  # Fall back to original behavior on any flatten error
+        return super().with_structured_output(schema, **kwargs)
+
+    def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+        flattened_tools = []
+        for t in tools:
+            # LangChain tools have an args_schema (Pydantic class) attribute
+            if hasattr(t, "args_schema") and t.args_schema is not None:
+                try:
+                    orig_cls = t.args_schema
+                    if hasattr(orig_cls, "model_json_schema"):
+                        # Attach a flattened cached schema so LangChain's
+                        # internal schema fetcher uses the inlined version
+                        flat = _inline_defs(orig_cls.model_json_schema())
+                        flat.setdefault("title", orig_cls.__name__)
+                        t = _copy.copy(t)  # don't mutate the original
+                        # Many LangChain tool classes let us override the json schema
+                        # by setting args_schema to a dict (StructuredTool pattern)
+                        try:
+                            t.args_schema = flat  # type: ignore[assignment]
+                        except Exception:  # noqa: BLE001, S110
+                            pass
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            flattened_tools.append(t)
+        return super().bind_tools(flattened_tools, **kwargs)
 
 
 # =============================================================================
@@ -296,12 +592,18 @@ def get_chat_llm(
         if not settings.anthropic_api_key:
             raise RuntimeError(f"Model '{model}' requires ANTHROPIC_API_KEY in the environment.")
         # Anthropic requires max_tokens; default to a sane ceiling if unset.
-        return ChatAnthropic(
+        # _CachingChatAnthropic is a transparent subclass that adds Anthropic's
+        # cache_control hint to large system prompts — same inputs, same
+        # outputs, lower input-token billing on reuse within ~5 min.
+        return _CachingChatAnthropic(
             api_key=settings.anthropic_api_key,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens or 4096,
-            timeout=120.0,
+            # langchain-anthropic uses `default_request_timeout`, not `timeout`.
+            # The 60s SDK default was dropping Sonnet's longer agentic/reasoning
+            # responses on SA-3. 180s is well under the 10-min API hard ceiling.
+            default_request_timeout=180.0,
             max_retries=10,
             callbacks=[callback],
         )
@@ -309,7 +611,11 @@ def get_chat_llm(
     if provider == "google":
         if not settings.google_api_key:
             raise RuntimeError(f"Model '{model}' requires GOOGLE_API_KEY in the environment.")
-        return ChatGoogleGenerativeAI(
+        # _SchemaFlatteningChatGoogle inlines $defs before passing schemas to
+        # Google's function-declarations API — same inputs semantically,
+        # just serialized without refs that Google can't resolve. Transparent
+        # for callers; OpenAI + Anthropic paths above are unchanged.
+        return _SchemaFlatteningChatGoogle(
             google_api_key=settings.google_api_key,
             model=model,
             temperature=temperature,

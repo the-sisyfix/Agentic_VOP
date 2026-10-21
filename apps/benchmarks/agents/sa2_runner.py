@@ -35,7 +35,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from apps.api.app.agents.llm import (
     clear_accumulated_tokens,
     get_accumulated_tokens,
-    invoke_structured_with_retry,
+    get_chat_llm,
 )
 from apps.api.app.config import settings
 from apps.api.app.db import supabase_admin
@@ -83,6 +83,23 @@ def run_sa2_once(
     settings.trace_token_usage = False
     clear_accumulated_tokens(run_id)
 
+    # Pre-insert a parent agent_runs row (same pattern as master/sa1/sa4
+    # runners) so trace-event FK constraints resolve for provider-specific
+    # token-usage callbacks that bypass the trace flag.
+    try:
+        sb.table("agent_runs").insert(
+            {
+                "run_id": run_id,
+                "event_id": f"bench-sa2-{run_id[:8]}",
+                "triggered_by": "benchmark",
+                "action": "FULL",
+                "targets": {"benchmark": True, "model_tag": model},
+                "status": "completed",
+            }
+        ).execute()
+    except Exception:  # noqa: BLE001, S110
+        pass
+
     started = time.perf_counter()
     output: Any = None
     error: str | None = None
@@ -90,16 +107,24 @@ def run_sa2_once(
     retries = 0
 
     try:
-        output = invoke_structured_with_retry(
+        # Bypass invoke_structured_with_retry — same latent bug as sa1_runner
+        # (last_err never assigned → bare AssertionError). Direct invoke.
+        llm = get_chat_llm(
             run_id=run_id,
             agent="sub-agent-2",
-            schema=LLMEnrichmentDecision,
-            messages=[
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            emit_fn=None,
+        )
+        structured_llm = llm.with_structured_output(
+            LLMEnrichmentDecision, method="function_calling"
+        )
+        output = structured_llm.invoke(
+            [
                 SystemMessage(content=prompt_row["prompt_text"]),
                 HumanMessage(content=str(fixture_input)),
-            ],
-            attempts=[(temperature, model, max_tokens)],
-            emit_fn=None,
+            ]
         )
     except Exception as e:  # noqa: BLE001
         error = f"{type(e).__name__}: {str(e)[:300]}"

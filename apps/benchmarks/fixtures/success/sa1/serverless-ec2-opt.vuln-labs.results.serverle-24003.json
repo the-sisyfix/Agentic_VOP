@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24003",
+  "scanner": "serverless-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 24003,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "Command injection via os.system with concatenated user input in Lambda handler. Use subprocess with a list of arguments.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-command-injection",
+    "end_line": 110,
+    "metadata": {
+      "cwe": [
+        "CWE-78"
+      ],
+      "owasp": [
+        "A03:2021 - Injection"
+      ]
+    },
+    "severity": "ERROR",
+    "start_line": 110
+  }
+}

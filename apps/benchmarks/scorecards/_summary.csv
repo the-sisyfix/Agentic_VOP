@@ -1,10 +1,16 @@
 agent,model,scorecard,n_runs,success_rate,latency_p50_ms,latency_p95_ms,latency_mean_ms,throughput_per_min_serial,mean_cost_usd,mean_cost_per_1k_chars,mean_efficacy_score,failure_modes
+master,claude-haiku-4-5,master_claude-haiku-4-5.csv,3,1.0,3537,3835,3610,16.62,0.002416,0.000792,0.694,
 master,gpt-4o,master_gpt-4o.csv,3,1.0,1072,1801,1305,45.95,0.002753,0.000903,0.583,
+sa1,claude-haiku-4-5,sa1_claude-haiku-4-5_success.csv,81,1.0,3935,5456,3937,15.24,0.006668,0.000646,0.938,
 sa1,gpt-4o-mini,sa1_gpt-4o-mini.csv,79,1.0,2485,5396,2883,20.81,0.000573,5.5e-05,0.792,
 sa1,gpt-4o-mini,sa1_gpt-4o-mini_success.csv,81,1.0,2826,4495,2875,20.87,0.000565,5.5e-05,0.802,
+sa2,claude-haiku-4-5,sa2_claude-haiku-4-5_success.csv,81,1.0,2997,4159,3144,19.08,0.006092,0.000379,0.943,
 sa2,gpt-4o-mini,sa2_gpt-4o-mini.csv,76,1.0,1443,1929,1487,40.33,0.000628,3.9e-05,0.899,
 sa2,gpt-4o-mini,sa2_gpt-4o-mini_success.csv,81,1.0,1486,1873,1526,39.31,0.000628,3.9e-05,0.922,
+sa3,claude-sonnet-4-6,sa3_claude-sonnet-4-6_success.csv,81,0.222,88825,247164,100692,0.6,0.0,0.0,1.0,
 sa3,gpt-4o,sa3_gpt-4o.csv,75,0.973,26214,44827,28951,2.07,0.0,0.0,0.992,
 sa3,gpt-4o,sa3_gpt-4o_success.csv,81,1.0,29071,51747,31493,1.91,0.0,0.0,0.994,
+sa4,claude-sonnet-4-6,sa4_claude-sonnet-4-6_success.PRE-FIX.csv,81,0.889,1688,23758,4764,12.59,0.011721,0.002078,0.889,schema_violation=9
+sa4,claude-sonnet-4-6,sa4_claude-sonnet-4-6_success.csv,81,0.0,255,350,273,219.52,0.0,0.0,0.0,other=81
 sa4,gpt-4o,sa4_gpt-4o.csv,15,1.0,909,2039,1210,49.55,0.00449,0.00103,0.6,
 sa4,gpt-4o,sa4_gpt-4o_success.csv,81,1.0,570,739,609,98.4,0.004608,0.000824,1.0,

@@ -1,0 +1,11 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24000",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "serverless-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.serverless-sql-injection",
+    "severity": "high",
+    "title_contains": "partiql",
+    "description_present": true
+  }
+}
