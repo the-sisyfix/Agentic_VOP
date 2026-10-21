@@ -162,19 +162,20 @@ def test_rollback_records_prior_digest_when_present():
 # ---------------------------------------------------------------------------
 # 4. Auto-sign dispatch is best-effort (never raises)
 # ---------------------------------------------------------------------------
-def test_signing_no_pat_returns_not_dispatched():
-    cfg = _config()
+def test_signing_no_auth_returns_not_dispatched():
+    # repo set but NEITHER github-app nor pat configured → skip gracefully.
+    cfg = HardeningConfig(github_repo="owner/repo")
     dispatched, msg = dispatch_signing_workflow(
-        cfg, github_pat="", image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+        cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
     )
     assert dispatched is False
     assert "not dispatched" in msg.lower()
 
 
 def test_signing_no_repo_returns_not_dispatched():
-    cfg = HardeningConfig(github_repo="")  # no repo configured
+    cfg = HardeningConfig(github_repo="", github_pat="tok")  # no repo configured
     dispatched, msg = dispatch_signing_workflow(
-        cfg, github_pat="tok", image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+        cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
     )
     assert dispatched is False
 
@@ -184,16 +185,161 @@ def test_signing_http_error_is_caught_not_raised():
     signing failures must not fail the hardening run."""
     import urllib.error
 
-    cfg = HardeningConfig(github_repo="owner/repo")
+    cfg = HardeningConfig(github_repo="owner/repo", github_pat="tok")
     with patch(
         "app.services.image_hardening.signing.urllib.request.urlopen",
         side_effect=urllib.error.HTTPError("u", 403, "Forbidden", {}, None),
     ):
         dispatched, msg = dispatch_signing_workflow(
-            cfg, github_pat="tok", image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+            cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
         )
     assert dispatched is False
     assert "403" in msg
+
+
+def test_signing_prefers_github_app_over_pat():
+    """When App creds are configured, the App token is minted + used (not PAT)."""
+    cfg = HardeningConfig(
+        github_repo="owner/repo",
+        github_app_id="5408664",
+        github_app_installation_id="173694041",
+        github_app_private_key_secret_arn="arn:aws:secretsmanager:...:secret:x",
+        github_pat="legacy-pat",
+    )
+    captured = {}
+
+    class _Resp:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=30):
+        captured["auth"] = req.get_header("Authorization")
+        return _Resp()
+
+    with (
+        patch(
+            "app.services.image_hardening.signing.get_installation_token",
+            return_value=("app-inst-token", None),
+        ),
+        patch(
+            "app.services.image_hardening.signing.urllib.request.urlopen",
+            side_effect=_fake_urlopen,
+        ),
+    ):
+        dispatched, msg = dispatch_signing_workflow(
+            cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+        )
+    assert dispatched is True
+    assert "github-app" in msg
+    # The App installation token was used as the Bearer credential, not the PAT.
+    assert captured["auth"] == "Bearer app-inst-token"
+
+
+def test_signing_app_failure_does_not_fall_through_to_pat():
+    """If the App is configured but token minting fails, we report the App error
+    and do NOT silently use the PAT (that would mask a misconfiguration)."""
+    cfg = HardeningConfig(
+        github_repo="owner/repo",
+        github_app_id="5408664",
+        github_app_installation_id="173694041",
+        github_app_private_key_secret_arn="arn:...:secret:x",
+        github_pat="legacy-pat",
+    )
+    with patch(
+        "app.services.image_hardening.signing.get_installation_token",
+        return_value=(None, "Secrets Manager get_secret_value failed: AccessDenied"),
+    ):
+        dispatched, msg = dispatch_signing_workflow(
+            cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+        )
+    assert dispatched is False
+    assert "github-app auth failed" in msg
+
+
+def test_signing_falls_back_to_pat_when_app_not_configured():
+    """No App fields, but a PAT → dispatch via PAT."""
+    cfg = HardeningConfig(github_repo="owner/repo", github_pat="legacy-pat")
+    captured = {}
+
+    class _Resp:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=30):
+        captured["auth"] = req.get_header("Authorization")
+        return _Resp()
+
+    with patch(
+        "app.services.image_hardening.signing.urllib.request.urlopen",
+        side_effect=_fake_urlopen,
+    ):
+        dispatched, msg = dispatch_signing_workflow(
+            cfg, image_digest="sha256:x", image_tag="v1", sbom_bucket="b"
+        )
+    assert dispatched is True
+    assert "pat" in msg
+    assert captured["auth"] == "Bearer legacy-pat"
+
+
+# ---------------------------------------------------------------------------
+# 4b. GitHub App auth (JWT build + token exchange)
+# ---------------------------------------------------------------------------
+def test_github_app_jwt_build_and_claims():
+    """_build_app_jwt produces a decodable RS256 JWT with the right claims."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    import jwt as _jwt
+    from app.services.image_hardening.github_app_auth import _build_app_jwt
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    pub_pem = (
+        key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
+
+    token, err = _build_app_jwt("5408664", pem)
+    assert err is None
+    decoded = _jwt.decode(token, pub_pem, algorithms=["RS256"])
+    assert decoded["iss"] == "5408664"
+    assert decoded["exp"] > decoded["iat"]
+
+
+def test_github_app_jwt_build_bad_key_returns_error():
+    from app.services.image_hardening.github_app_auth import _build_app_jwt
+
+    token, err = _build_app_jwt("5408664", "not-a-valid-pem")
+    assert token is None
+    assert err is not None
+
+
+def test_get_installation_token_not_configured():
+    from app.services.image_hardening.github_app_auth import get_installation_token
+
+    token, err = get_installation_token(
+        app_id="", installation_id="", private_key_secret_arn="", region="us-east-1"
+    )
+    assert token is None
+    assert "not fully configured" in err
 
 
 # ---------------------------------------------------------------------------

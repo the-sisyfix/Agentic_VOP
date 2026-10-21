@@ -77,11 +77,22 @@ class HardeningConfig:
 
     # --- Auto-sign (GitHub Actions dispatch) ---
     # When a run has auto_sign=True, the orchestrator dispatches the signing
-    # workflow. These identify the workflow to trigger. Token comes from
-    # settings.github_pat (reused; needs actions:write).
+    # workflow. These identify the workflow to trigger.
     github_repo: str = ""  # "owner/repo"
     github_sign_workflow: str = "image-sign.yml"
     github_sign_ref: str = "main"
+
+    # Dispatch auth. Preferred: GitHub App (short-lived installation token, no
+    # long-lived secret). Fallback: a PAT. If neither is configured, dispatch
+    # is skipped gracefully (operator signs manually).
+    #   - github_app_id / github_app_installation_id: App identity (not secret).
+    #   - github_app_private_key_secret_arn: AWS Secrets Manager reference to the
+    #     App .pem (the KEY VALUE is never in config — only this reference).
+    #   - github_pat: legacy fallback token.
+    github_app_id: str = ""
+    github_app_installation_id: str = ""
+    github_app_private_key_secret_arn: str = ""
+    github_pat: str = ""
 
 
 def load_hardening_config() -> HardeningConfig:
@@ -99,6 +110,12 @@ def load_hardening_config() -> HardeningConfig:
         sbom_bucket=getattr(settings, "hardening_sbom_bucket", ""),
         github_repo=getattr(settings, "github_repo", "")
         or getattr(settings, "github_repository", ""),
+        github_app_id=getattr(settings, "github_app_id", ""),
+        github_app_installation_id=getattr(settings, "github_app_installation_id", ""),
+        github_app_private_key_secret_arn=getattr(
+            settings, "github_app_private_key_secret_arn", ""
+        ),
+        github_pat=getattr(settings, "github_pat", ""),
     )
 
 

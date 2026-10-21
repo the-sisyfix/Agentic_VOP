@@ -19,8 +19,6 @@ import json
 import logging
 from typing import Any
 
-from app.config import settings
-
 from .config import HardeningConfig, load_hardening_config, resolve_build_instance
 from .dep_bump import apply_pip_bumps, compute_pip_bumps
 from .models import HardenContext, HardeningOutcome, utcnow
@@ -164,7 +162,6 @@ def run_hardening(
     if auto_sign and outcome.status == "success" and ctx.published_digest:
         dispatched, msg = dispatch_signing_workflow(
             cfg,
-            github_pat=getattr(settings, "github_pat", ""),
             image_digest=ctx.published_digest,
             image_tag=published_tag,
             sbom_bucket=ctx.sbom_bucket or cfg.sbom_bucket,

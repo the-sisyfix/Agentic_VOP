@@ -114,6 +114,21 @@ class Settings(BaseSettings):
     github_repo: str = ""
     github_base_branch: str = "main"
 
+    # --- GitHub App auth for image-hardening auto-sign dispatch -----------
+    # Preferred over github_pat for programmatically dispatching the signing
+    # workflow (short-lived installation tokens, no long-lived PAT). All
+    # optional: when any is empty, auto-dispatch falls back to github_pat, and
+    # if that is also empty, signing is skipped gracefully (dispatch manually).
+    #
+    # github_app_id                      — the App's numeric id
+    # github_app_installation_id         — the installation id on the target repo
+    # github_app_private_key_secret_arn  — AWS Secrets Manager ARN/name holding
+    #   the App private key (.pem). The KEY VALUE is never in env/config — only
+    #   this reference; the backend fetches it from Secrets Manager at dispatch.
+    github_app_id: str = ""
+    github_app_installation_id: str = ""
+    github_app_private_key_secret_arn: str = ""
+
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
     # scanner metadata (headers, body, credentials). REQUIRED for production.
