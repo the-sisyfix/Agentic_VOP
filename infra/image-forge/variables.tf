@@ -15,12 +15,27 @@ variable "aws_region" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository in 'owner/repo' format for the OIDC trust policy on the CI signing role. Change this one value when the repo migrates to a new owner."
+  description = "GitHub repository in 'owner/repo' format. Used for non-OIDC references. OIDC trust on the CI signing role uses github_subject_prefix."
   type        = string
 
   validation {
     condition     = can(regex("^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$", var.github_repository))
     error_message = "github_repository must be in 'owner/repo' format."
+  }
+}
+
+variable "github_subject_prefix" {
+  description = <<-EOT
+    Immutable OIDC subject-claim prefix for the CI signing role's trust policy, in the form
+    'repo:<owner>@<owner_id>/<repo>@<repo_id>'. Copy from the repo's Settings > Actions > OIDC
+    "Default subject claim prefix". Trust conditions append the usual suffixes.
+    NOTE: this prefix is also the cosign --certificate-identity base; update verifiers accordingly.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^repo:[a-zA-Z0-9_.-]+@[0-9]+/[a-zA-Z0-9_.-]+@[0-9]+$", var.github_subject_prefix))
+    error_message = "github_subject_prefix must look like 'repo:<owner>@<owner_id>/<repo>@<repo_id>'."
   }
 }
 
@@ -55,9 +70,9 @@ variable "ecr_repository_name" {
 }
 
 variable "ecr_image_tag_mutability" {
-  description = "ECR tag mutability. IMMUTABLE is preferred for a supply chain (tags can't be silently overwritten), but MUTABLE is convenient while iterating on the test slice."
+  description = "ECR tag mutability. MUTABLE is required when cosign stores signatures/attestations as derived OCI tags (sha256-<digest>.sig/.att) in the same repo — IMMUTABLE blocks re-signing with TAG_INVALID. Integrity comes from signing the immutable digest + Rekor, not from ECR tag immutability. Production target: immutable image tags with a mutability exclusion for *.sig/*.att."
   type        = string
-  default     = "IMMUTABLE"
+  default     = "MUTABLE"
 
   validation {
     condition     = contains(["MUTABLE", "IMMUTABLE"], var.ecr_image_tag_mutability)
@@ -69,6 +84,12 @@ variable "ecr_untagged_expire_days" {
   description = "Expire untagged images in the test repo after this many days (keeps throwaway build artifacts from piling up)"
   type        = number
   default     = 7
+}
+
+variable "sbom_expire_days" {
+  description = "Expire SBOM artifacts (and noncurrent versions) in the SBOM bucket after this many days."
+  type        = number
+  default     = 30
 }
 
 # --- Supply-chain toolchain versions (installed by user-data) ---

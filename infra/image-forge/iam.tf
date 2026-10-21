@@ -74,6 +74,36 @@ resource "aws_iam_role_policy" "build_ecr_push" {
   })
 }
 
+# S3: the build box uploads the SBOM it generates to the SBOM bucket under the
+# sboms/ prefix (keyed by image digest). Write-only + list; no read needed.
+resource "aws_iam_role_policy" "build_sbom_put" {
+  name = "${local.name}-sbom-put-policy"
+  role = aws_iam_role.build.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "SBOMPutObject"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
+        Resource = "${local.sbom_bucket_arn}/sboms/*"
+      },
+      {
+        Sid      = "SBOMListBucketPrefix"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = local.sbom_bucket_arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "sboms/*"
+          }
+        }
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "build" {
   name = "${local.name}-ec2"
   role = aws_iam_role.build.name
@@ -132,8 +162,8 @@ resource "aws_iam_role" "ci_image_sign" {
           # Stricter than most existing roles here, which use repo:...:* (any ref).
           StringLike = {
             "token.actions.githubusercontent.com:sub" = [
-              "repo:${var.github_repository}:ref:refs/heads/main",
-              "repo:${var.github_repository}:environment:*"
+              "${var.github_subject_prefix}:ref:refs/heads/main",
+              "${var.github_subject_prefix}:environment:*"
             ]
           }
         }
@@ -178,6 +208,14 @@ resource "aws_iam_role_policy" "ci_image_sign" {
           "ecr:CompleteLayerUpload"
         ]
         Resource = local.ecr_repository_arn
+      },
+      {
+        # Download the build-box-generated SBOM (by digest) to attach as an
+        # attestation. Read-only, scoped to the sboms/ prefix.
+        Sid      = "SBOMGetObject"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${local.sbom_bucket_arn}/sboms/*"
       }
     ]
   })

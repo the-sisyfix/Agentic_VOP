@@ -49,7 +49,7 @@ FROM gcr.io/distroless/static:nonroot@sha256:dd804b6c91a33a478f9a56e5033f4630076
 
 # OCI image labels — provenance-friendly metadata. source/revision are build
 # args so CI can stamp the exact commit without editing the Dockerfile.
-ARG SOURCE_REPO="https://github.com/arshiya19/Agentic_VOP"
+ARG SOURCE_REPO="https://github.com/the-sisyfix/Agentic_VOP"
 ARG SOURCE_REVISION="dev"
 LABEL org.opencontainers.image.title="sisyfix-static-hello" \
       org.opencontainers.image.description="Curated minimal/hardened sample base image (distroless, static, non-root)" \

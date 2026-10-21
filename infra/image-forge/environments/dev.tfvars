@@ -4,7 +4,12 @@ aws_region = "us-east-1"
 # GitHub repo whose Actions OIDC identity is trusted to sign images (gated to
 # main). Change this single value if/when the repo migrates to a new owner,
 # then re-apply — and update the verification identity in the signing design.
-github_repository = "arshiya19/Agentic_VOP"
+github_repository = "the-sisyfix/Agentic_VOP"
+
+# Immutable OIDC subject prefix (owner-id + repo-id embedded). Source of truth:
+# repo Settings > Actions > OIDC "Default subject claim prefix". This prefix is
+# also the cosign --certificate-identity base — update image verifiers to match.
+github_subject_prefix = "repo:the-sisyfix@339457570/Agentic_VOP@1223959649"
 
 # VPC CIDR reuses 10.1.0.0/16 — freed by deleting the manual VOP-vpc-adhoc VPC.
 vpc_cidr           = "10.1.0.0/16"
@@ -14,8 +19,12 @@ public_subnet_cidr = "10.1.1.0/24"
 instance_type = "t4g.medium"
 volume_size   = 40
 
-# Test publish target. IMMUTABLE tags model a real supply chain; flip to
-# MUTABLE only if rapid re-tagging during manual iteration gets in the way.
+# Test publish target. MUTABLE because cosign stores signatures/attestations
+# as derived OCI tags (sha256-<digest>.sig / .att) and must be able to write
+# (and re-write on re-sign) them — IMMUTABLE blocks that with TAG_INVALID.
+# Integrity still comes from signing the immutable DIGEST + the Rekor log, not
+# from ECR tag immutability. Production milestone: immutable image tags + a
+# mutability EXCLUSION for the *.sig/*.att cosign tags.
 ecr_repository_name      = "sisyfix-hardened-base-test"
-ecr_image_tag_mutability = "IMMUTABLE"
+ecr_image_tag_mutability = "MUTABLE"
 ecr_untagged_expire_days = 7

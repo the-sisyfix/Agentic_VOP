@@ -27,3 +27,8 @@ output "ci_image_sign_role_arn" {
   description = "ARN of the GitHub Actions CI signing role (configure as the role-to-assume in the signing workflow)"
   value       = aws_iam_role.ci_image_sign.arn
 }
+
+output "sbom_bucket_name" {
+  description = "Name of the S3 bucket where the build box uploads SBOMs (keyed by digest under sboms/)"
+  value       = aws_s3_bucket.sbom.bucket
+}

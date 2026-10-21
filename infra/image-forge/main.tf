@@ -54,6 +54,10 @@ locals {
   # The one test ECR repository the build box is allowed to push to.
   ecr_repository_arn = "arn:aws:ecr:${var.aws_region}:${local.account_id}:repository/${var.ecr_repository_name}"
 
+  # SBOM artifacts bucket name (defined in s3.tf) — referenced by IAM policies.
+  sbom_bucket_name = "${local.name}-sbom-${local.account_id}"
+  sbom_bucket_arn  = "arn:aws:s3:::${local.name}-sbom-${local.account_id}"
+
   # Shared GitHub Actions OIDC provider (created in the top-level infra/ state —
   # referenced by ARN here, same pattern app-hosting uses for shared resources).
   github_oidc_provider_arn = "arn:aws:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"

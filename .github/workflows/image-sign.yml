@@ -50,6 +50,11 @@ on:
         required: false
         default: "v0.1.0"
         type: string
+      sbom_bucket:
+        description: "S3 bucket holding the build-box SBOM (sboms/<digest>.spdx.json)"
+        required: false
+        default: "sisyfix-dev-image-forge-sbom-486655355038"
+        type: string
 
 permissions:
   id-token: write   # OIDC token for AWS + Fulcio keyless signing
@@ -99,23 +104,34 @@ jobs:
           cosign sign --yes "${{ env.ECR_IMAGE }}@${DIGEST}"
           echo "✅ Image signed successfully"
 
-      # ── 5. SBOM attestation — DEFERRED (next milestone) ──
-      # NOTE: SBOM attestation is intentionally NOT done here yet.
-      #
-      # Regenerating the SBOM in CI fails for two reasons:
-      #   1. Arch mismatch — the image is arm64 (built on the arm64 build box)
-      #      but the GitHub runner is amd64, so syft cannot pull it to scan.
-      #   2. syft's own registry client did not inherit the ECR login (401).
-      #
-      # The correct design is NOT to regenerate the SBOM in CI. The build box
-      # already produced a valid SBOM (syft, from the exact image) at build
-      # time. The next milestone wires the build box to publish that SBOM to
-      # an S3 artifacts bucket keyed by digest; this workflow will download it
-      # by digest and run `cosign attest --type spdxjson --predicate <sbom>`.
-      # cosign attaches attestations by digest WITHOUT pulling the image, so it
-      # is arch-independent and will work on the amd64 runner.
-      #
-      # For this slice we prove sign + SLSA provenance + verify end-to-end.
+      # ── 5. Attach the build-box SBOM as an attestation ──
+      # The build box generated the SBOM (syft, from the exact arm64 image) and
+      # uploaded it to S3 keyed by digest. We download it BY DIGEST and attest
+      # it. cosign attaches the attestation by digest WITHOUT pulling the image,
+      # so this is arch-independent (works on the amd64 runner) — the fix for
+      # the earlier regenerate-in-CI failure (arm64/amd64 mismatch + 401).
+      - name: Download SBOM from S3 (by digest)
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          # S3 key mirrors the build box's upload path: sboms/<digest>.spdx.json
+          # (slashes in the digest are not an issue — the digest has none; it is
+          # "sha256:<hex>", and ':' is a valid S3 key character.)
+          S3_KEY="sboms/${DIGEST}.spdx.json"
+          echo "Downloading s3://${{ inputs.sbom_bucket }}/${S3_KEY}"
+          aws s3 cp "s3://${{ inputs.sbom_bucket }}/${S3_KEY}" /tmp/sbom.spdx.json
+          echo "SBOM size: $(wc -c < /tmp/sbom.spdx.json) bytes"
+
+      - name: Attach SBOM as attestation
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Attaching SBOM attestation to ${{ env.ECR_IMAGE }}@${DIGEST}"
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate /tmp/sbom.spdx.json \
+            "${{ env.ECR_IMAGE }}@${DIGEST}"
+          echo "✅ SBOM attestation attached"
 
       # ── 6. Generate and attach SLSA build provenance ──
       - name: Attach SLSA build provenance
@@ -168,31 +184,65 @@ jobs:
           echo "✅ SLSA provenance attestation attached"
 
       # ── 7. Verify the signature (smoke test) ──
+      # NOTE: cosign verify / verify-attestation stream the verified payload(s)
+      # to stdout AFTER printing the verification result. In this runner that
+      # stdout stream can block and hang the step even though verification
+      # already succeeded. We redirect stdout to a file so the stream drains
+      # and cosign exits; the exit CODE (pass/fail) is preserved, so a real
+      # verification failure still fails the step. A `timeout` guards against
+      # any future hang instead of letting it run for minutes.
       - name: Verify signature
         env:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying signature on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          cosign verify \
+          if ! timeout 120 cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sig.out 2>&1; then
+            echo "❌ Signature verification FAILED (or timed out). Output:"
+            cat /tmp/verify-sig.out
+            exit 1
+          fi
+          # Show only the human-readable verification header, not the streamed payload.
+          grep -A20 "verified using trusted certificate" /tmp/verify-sig.out || true
           echo "✅ Signature verification passed"
 
-      # ── 8. Verify the SLSA provenance attestation (smoke test) ──
-      # Verifies the attestation we DID create in step 6. (SBOM attestation
-      # verification returns in the next milestone, once SBOM is attached.)
+      # ── 8a. Verify the SLSA provenance attestation (smoke test) ──
       - name: Verify SLSA provenance attestation
         env:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying SLSA provenance attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          cosign verify-attestation \
+          if ! timeout 120 cosign verify-attestation \
             --type slsaprovenance1 \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-slsa.out 2>&1; then
+            echo "❌ SLSA provenance verification FAILED (or timed out). Output:"
+            cat /tmp/verify-slsa.out
+            exit 1
+          fi
+          grep -A20 "verified using trusted certificate" /tmp/verify-slsa.out || true
           echo "✅ SLSA provenance attestation verification passed"
+
+      # ── 8b. Verify the SBOM attestation (smoke test) ──
+      - name: Verify SBOM attestation
+        env:
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          echo "Verifying SBOM attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
+          if ! timeout 120 cosign verify-attestation \
+            --type spdxjson \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sbom.out 2>&1; then
+            echo "❌ SBOM attestation verification FAILED (or timed out). Output:"
+            cat /tmp/verify-sbom.out
+            exit 1
+          fi
+          grep -A20 "verified using trusted certificate" /tmp/verify-sbom.out || true
+          echo "✅ SBOM attestation verification passed"
 
       # ── 9. Summary ──
       - name: Summary
@@ -208,7 +258,7 @@ jobs:
           echo "| **Digest** | \`${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Signed** | ✅ Keyless (Fulcio + Rekor) |" >> $GITHUB_STEP_SUMMARY
           echo "| **SLSA Provenance** | ✅ Attestation attached + verified |" >> $GITHUB_STEP_SUMMARY
-          echo "| **SBOM** | ⏳ Deferred to next milestone (via S3, build-box-generated) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SBOM** | ✅ SPDX attestation attached + verified (build-box-generated, via S3) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Signing Identity** | GitHub Actions OIDC (\`${{ github.repository }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Transparency Log** | Public Rekor |" >> $GITHUB_STEP_SUMMARY
           echo "| **Verify command** | \`cosign verify --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' ${{ env.ECR_IMAGE }}@${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
