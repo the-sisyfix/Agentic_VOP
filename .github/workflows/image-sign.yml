@@ -74,6 +74,10 @@ jobs:
   sign-and-attest:
     name: "Sign & Attest · Hardened Base Image"
     runs-on: ubuntu-latest
+    # Hard safety net: a hung step (e.g. cosign verify draining a large payload
+    # on a multi-arch index) can never run for hours. Signing + attestation are
+    # done well before the verify smoke-tests, so a cap here is safe.
+    timeout-minutes: 20
 
     steps:
       # ── 0. Checkout (needed for provenance -- source context) ──
@@ -196,17 +200,27 @@ jobs:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying signature on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          if ! timeout 120 cosign verify \
+          # cosign prints the verification RESULT first, then streams the
+          # verified payload to stdout — and that stream can block (seen on
+          # multi-arch indexes with large payloads). timeout --kill-after
+          # SIGTERMs at 120s then SIGKILLs 30s later so a stuck drain is always
+          # killed; </dev/null closes stdin. We then judge PASS/FAIL by the
+          # success MARKER in the output, not by the exit code — a timeout that
+          # happens AFTER cosign already printed success is a cosmetic drain
+          # hang, not a verification failure, and must not fail the workflow
+          # (signing + attestation already completed in earlier steps).
+          timeout --kill-after=30s 120 cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sig.out 2>&1; then
-            echo "❌ Signature verification FAILED (or timed out). Output:"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" </dev/null > /tmp/verify-sig.out 2>&1 || true
+          if grep -q "verified using trusted certificate" /tmp/verify-sig.out; then
+            grep -A20 "verified using trusted certificate" /tmp/verify-sig.out || true
+            echo "✅ Signature verification passed"
+          else
+            echo "❌ Signature verification FAILED. Output:"
             cat /tmp/verify-sig.out
             exit 1
           fi
-          # Show only the human-readable verification header, not the streamed payload.
-          grep -A20 "verified using trusted certificate" /tmp/verify-sig.out || true
-          echo "✅ Signature verification passed"
 
       # ── 8a. Verify the SLSA provenance attestation (smoke test) ──
       - name: Verify SLSA provenance attestation
@@ -214,17 +228,21 @@ jobs:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying SLSA provenance attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          if ! timeout 120 cosign verify-attestation \
+          # See the signature step for why we judge by the success MARKER, not
+          # the exit code (cosign payload-drain can hang after printing success).
+          timeout --kill-after=30s 120 cosign verify-attestation \
             --type slsaprovenance1 \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-slsa.out 2>&1; then
-            echo "❌ SLSA provenance verification FAILED (or timed out). Output:"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" </dev/null > /tmp/verify-slsa.out 2>&1 || true
+          if grep -q "verified using trusted certificate" /tmp/verify-slsa.out; then
+            grep -A20 "verified using trusted certificate" /tmp/verify-slsa.out || true
+            echo "✅ SLSA provenance attestation verification passed"
+          else
+            echo "❌ SLSA provenance verification FAILED. Output:"
             cat /tmp/verify-slsa.out
             exit 1
           fi
-          grep -A20 "verified using trusted certificate" /tmp/verify-slsa.out || true
-          echo "✅ SLSA provenance attestation verification passed"
 
       # ── 8b. Verify the SBOM attestation (smoke test) ──
       - name: Verify SBOM attestation
@@ -232,17 +250,24 @@ jobs:
           DIGEST: ${{ inputs.image_digest }}
         run: |
           echo "Verifying SBOM attestation on ${{ env.ECR_IMAGE }}@${DIGEST}"
-          if ! timeout 120 cosign verify-attestation \
+          # This is the step that hung at ~19 min on a multi-arch index (large
+          # SPDX payload drain). Judge by the success MARKER, not the exit code:
+          # a timeout AFTER cosign printed success is a cosmetic drain hang, not
+          # a verification failure. The job-level timeout-minutes is the final
+          # backstop.
+          timeout --kill-after=30s 120 cosign verify-attestation \
             --type spdxjson \
             --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/image-sign.yml@.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${{ env.ECR_IMAGE }}@${DIGEST}" > /tmp/verify-sbom.out 2>&1; then
-            echo "❌ SBOM attestation verification FAILED (or timed out). Output:"
+            "${{ env.ECR_IMAGE }}@${DIGEST}" </dev/null > /tmp/verify-sbom.out 2>&1 || true
+          if grep -q "verified using trusted certificate" /tmp/verify-sbom.out; then
+            grep -A20 "verified using trusted certificate" /tmp/verify-sbom.out || true
+            echo "✅ SBOM attestation verification passed"
+          else
+            echo "❌ SBOM attestation verification FAILED. Output:"
             cat /tmp/verify-sbom.out
             exit 1
           fi
-          grep -A20 "verified using trusted certificate" /tmp/verify-sbom.out || true
-          echo "✅ SBOM attestation verification passed"
 
       # ── 9. Summary ──
       - name: Summary
