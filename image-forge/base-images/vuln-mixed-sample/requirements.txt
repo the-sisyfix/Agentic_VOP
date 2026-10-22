@@ -1,0 +1,13 @@
+# =============================================================================
+# DELIBERATELY VULNERABLE pip manifest — test fixture for the hardening
+# pipeline's COMBINED path (copa OS patch + dependency-bump rebuild).
+#
+# urllib3 1.26.5 is a DIRECT, DECLARED pip dependency with known HIGH CVEs that
+# have a 3.12-installable FixedVersion (proven: bumps to 2.8.0, installs clean).
+# This provides the DEPENDENCY leg of the mixed test; the base OS provides the
+# copa (OS-patch) leg.
+#
+# DO NOT use this image for anything real — it exists only to prove the leg.
+# =============================================================================
+
+urllib3==1.26.5
