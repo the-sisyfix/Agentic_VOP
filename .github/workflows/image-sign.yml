@@ -231,8 +231,6 @@ jobs:
           fi
           grep -A20 "verified using trusted certificate" /tmp/verify-sig.out || true
           echo "✅ Signature verification passed"
-            exit 1
-          fi
 
       # ── 9. Summary ──
       - name: Summary
