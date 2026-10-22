@@ -158,3 +158,49 @@ platform set; the copa (OS) path can be made multi-platform-aware separately.
 
 **Status:** DEFERRED — part of the broader multi-arch milestone (the copa path is
 also arm64-only today). Known and accepted for the current single-arch MVP.
+
+---
+
+## 5. cosign verify-attestation hangs on GitHub-hosted runners (large payload)
+
+**Discovered:** runs #17/#18/#19 (auto-sign signing workflow on a multi-arch
+image).
+
+**Problem.** `cosign verify-attestation` prints the verification RESULT and then
+STREAMS the full verified predicate to stdout. For our hardened images the SBOM
+attestation predicate is large (~2.6 MB SPDX; the `.att` artifact in ECR is
+~3.6 MB). On GitHub-hosted runners, streaming that large payload through the
+Actions log pipe HANGS the step indefinitely — observed hanging 19-23 min and
+requiring manual cancellation, even though verification itself had already
+succeeded (the "verified using trusted certificate" line prints first).
+
+**Not cosign, not our code, not `timeout`.** The identical command exits `0` in
+seconds on the build box (verified: `EXIT=0`). `timeout --kill-after` did NOT
+reap it on the runner. So it is a GitHub-hosted-runner stdout/log-collector
+artifact specific to large cosign payloads — not reproducible off the runner.
+
+**Current behavior (MVP decision).** The signing workflow (`image-sign.yml`)
+now verifies the SIGNATURE ONLY in-workflow (`cosign verify` — small payload,
+reliable) and DOES NOT verify the SLSA/SBOM attestations there. The attestations
+are still SIGNED + ATTACHED in ECR (the `.att` artifact); verifying them is the
+CONSUMER's job at pull/deploy time. The workflow Summary documents the
+consumer-side `cosign verify-attestation` command. (See the "Verify signature"
+step comment in image-sign.yml.)
+
+Why this is acceptable for the MVP: the signer's job is to sign + attest +
+publish. Re-verifying its own attestation in-workflow is a redundant self-check;
+real verification belongs downstream (deploy pipeline / admission control), and
+we have no clients with a verification flow established yet.
+
+**Candidate enhancements (later, when a consumer-side flow exists).**
+- Verify attestations off the GitHub-hosted runner (e.g. on the build box, where
+  the same command exits cleanly) or on a self-hosted runner.
+- Suppress/bound cosign's payload output so the runner never has to drain it
+  (e.g. output flags / pipe to a bounded reader), then re-enable strict
+  in-workflow attestation verification.
+- Move verification to a dedicated consumer-side step / admission controller —
+  the architecturally correct home for it.
+
+**Status:** DEFERRED. Signature verified in-workflow; attestation verification
+deferred to consume-time. A1 (auto-sign) proven end-to-end in run #20 (workflow
+completed green).
