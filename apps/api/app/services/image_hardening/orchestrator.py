@@ -314,12 +314,36 @@ def _run_copa_lifecycle(
         # --- 1. Full-scope intake scan = source of truth for gate + routing ---
         intake = copa.full_scope_scan(ctx, ctx.source_image_ref)
         log.info(
-            "hardening_run #%s intake: os_fixable=%d dep_fixable=%d",
+            "hardening_run #%s intake: os_fixable=%d dep_fixable=%d os=%s %s",
             run_id,
             intake.os_fixable,
             intake.dep_fixable,
+            intake.os_family,
+            intake.os_name,
         )
         current_ref = ctx.source_image_ref
+
+        # --- 1a. End-of-life base fail-fast ---
+        # If the detected base OS is past EOL, its security mirror no longer
+        # serves packages → copa would fail mid-patch with opaque 404s. Fail
+        # fast with a clear message BEFORE any patching. Only applies when the
+        # image has OS findings to patch; a policy-zero EOL image (nothing to
+        # fix) is still publishable, so we check EOL only on the patch path.
+        from .eol import check_eol  # noqa: PLC0415
+
+        eol = check_eol(intake.os_family, intake.os_name)
+        if eol.is_eol and intake.os_fixable > 0:
+            log.info("hardening_run #%s EOL base detected: %s", run_id, eol.reason)
+            return HardeningOutcome(
+                status="failed",
+                scan_summary={
+                    **_intake_summary(intake),
+                    "eol_base": True,
+                    "os": f"{eol.os_family} {eol.os_version}",
+                    "eol_date": eol.eol_date,
+                },
+                error_message=eol.message,
+            )
 
         # --- 2. Already policy-zero (incl. only-unfixable case) → publish ---
         if intake.gate_passes:

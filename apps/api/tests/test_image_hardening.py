@@ -473,6 +473,79 @@ def test_parse_box_summary_hard_fails_when_box_reports_not_ok():
         parse_box_summary('__HARDEN_SCAN_SUMMARY__ {"ok": false, "error": "no such file"}')
 
 
+def test_parse_box_summary_reads_os_fields():
+    from app.services.image_hardening.scanning import parse_box_summary
+
+    out = (
+        '__HARDEN_SCAN_SUMMARY__ {"ok": true, "os_critical": 1, "os_high": 2, '
+        '"dep_critical": 0, "dep_high": 0, "os_family": "debian", "os_name": "11.0"}'
+    )
+    c = parse_box_summary(out)
+    assert c.os_family == "debian"
+    assert c.os_name == "11.0"
+
+
+def test_parse_box_summary_os_fields_default_empty_when_absent():
+    # Backward compat: older box output without os_* keys must still parse.
+    from app.services.image_hardening.scanning import parse_box_summary
+
+    out = (
+        '__HARDEN_SCAN_SUMMARY__ {"ok": true, "os_critical": 0, "os_high": 0, '
+        '"dep_critical": 0, "dep_high": 0}'
+    )
+    c = parse_box_summary(out)
+    assert c.os_family == ""
+    assert c.os_name == ""
+
+
+def test_box_count_command_extracts_os_metadata():
+    from app.services.image_hardening.scanning import box_count_command
+
+    cmd = box_count_command("/scratch/full.json")
+    assert "Metadata" in cmd
+    assert "os_family" in cmd
+
+
+# ---- EOL base detection (pure) ----
+def test_eol_flags_debian_11():
+    from app.services.image_hardening.eol import check_eol
+
+    v = check_eol("debian", "11.0")
+    assert v.is_eol is True
+    assert v.eol_date == "2026-08-31"
+    assert "end-of-life" in v.message.lower()
+
+
+def test_eol_passes_debian_12():
+    from app.services.image_hardening.eol import check_eol
+
+    v = check_eol("debian", "12.5")
+    assert v.is_eol is False
+    assert v.message == ""
+
+
+def test_eol_matches_major_only_for_debian_point_release():
+    from app.services.image_hardening.eol import check_eol
+
+    # Debian table is keyed by major ("11"); a point release "11.7" must match.
+    assert check_eol("debian", "11.7").is_eol is True
+
+
+def test_eol_matches_ubuntu_major_minor():
+    from app.services.image_hardening.eol import check_eol
+
+    assert check_eol("ubuntu", "18.04").is_eol is True
+    assert check_eol("ubuntu", "22.04").is_eol is False
+
+
+def test_eol_fail_open_on_unknown_or_missing_os():
+    from app.services.image_hardening.eol import check_eol
+
+    assert check_eol("", "").is_eol is False  # no OS (distroless/scratch)
+    assert check_eol("fedora", "40").is_eol is False  # not in table → not blocked
+    assert check_eol("debian", "").is_eol is False  # family but no version
+
+
 # ---- residual extractor (box builds files, prints only counts) ----
 def test_box_residual_command_embeds_paths_and_marker():
     from app.services.image_hardening.scanning import box_residual_command
@@ -1211,6 +1284,49 @@ def test_lifecycle_residual_upload_failure_is_non_gating(monkeypatch):
     assert out.scan_summary["residual_total"] == 2
     assert out.scan_summary.get("residual_status") == "computed_not_uploaded"
     assert "residual_s3_key" not in out.scan_summary
+
+
+def test_lifecycle_eol_base_with_os_findings_fails_fast(monkeypatch):
+    """An EOL base (debian 11) WITH OS fixables → fail fast before patching,
+    with an eol_base scan_summary and a clear message."""
+    eol_intake = ScanClassification(os_critical=5, os_family="debian", os_name="11.0")
+    copa, ctx, cfg = _copa_fixture(monkeypatch, scans=[eol_intake])
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "failed"
+    assert out.scan_summary.get("eol_base") is True
+    assert out.scan_summary.get("eol_date") == "2026-08-31"
+    assert "end-of-life" in (out.error_message or "").lower()
+
+
+def test_lifecycle_eol_base_but_clean_still_publishes(monkeypatch):
+    """An EOL base with NOTHING fixable (policy-zero) is still publishable —
+    EOL fail-fast only applies when there are OS findings to patch."""
+    clean_eol = ScanClassification(os_family="debian", os_name="11.0")  # 0 fixable
+    copa, ctx, cfg = _copa_fixture(monkeypatch, scans=[clean_eol])
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+
+
+def test_lifecycle_supported_base_not_blocked(monkeypatch):
+    """A supported base (debian 12) with OS findings proceeds to copa normally."""
+    copa, ctx, cfg = _copa_fixture(
+        monkeypatch,
+        scans=[
+            ScanClassification(os_critical=1, os_family="debian", os_name="12.5"),
+            _clean(),
+        ],
+        remediate_result={
+            "status": "clean",
+            "iterations": 1,
+            "final_image_ref": "img:patched",
+            "steps": [],
+            "final_scan": None,
+            "message": "",
+        },
+    )
+    out = orch._run_copa_lifecycle(_FakeSB(), 1, copa, ctx, cfg=cfg, started_at=_now())
+    assert out.status == "success"
+    assert out.scan_summary.get("eol_base") is None  # not flagged
 
 
 def test_lifecycle_already_clean_records_zero_intake(monkeypatch):

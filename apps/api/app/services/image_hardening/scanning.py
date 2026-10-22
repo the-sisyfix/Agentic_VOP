@@ -60,6 +60,11 @@ class ScanClassification:
     os_high: int = 0
     dep_critical: int = 0
     dep_high: int = 0
+    # Detected base-OS identity (from trivy Metadata.OS). Used by the
+    # orchestrator for end-of-life fail-fast. Empty for non-OS images (e.g.
+    # scratch/distroless) — which is fine, EOL check simply doesn't apply.
+    os_family: str = ""
+    os_name: str = ""
 
     @property
     def os_fixable(self) -> int:
@@ -138,8 +143,13 @@ def box_count_command(report_path: str) -> str:
         "            oc+=1 if is_os else 0; dc+=0 if is_os else 1\n"
         "        else:\n"
         "            oh+=1 if is_os else 0; dh+=0 if is_os else 1\n"
+        # Capture the detected OS (family + version) from trivy's Metadata so the
+        # orchestrator can fail fast on an END-OF-LIFE base before any patching.
+        "osm=((d.get('Metadata') or {}).get('OS') or {})\n"
+        "ofam=osm.get('Family') or ''\n"
+        "oname=osm.get('Name') or ''\n"
         "print(mk+' '+json.dumps({'ok':True,'os_critical':oc,'os_high':oh,"
-        "'dep_critical':dc,'dep_high':dh}))\n"
+        "'dep_critical':dc,'dep_high':dh,'os_family':ofam,'os_name':oname}))\n"
     )
     return (
         f"python3 - '{report_path}' '{_SUMMARY_MARKER}' "
@@ -175,6 +185,10 @@ def parse_box_summary(stdout: str) -> ScanClassification:
             os_high=int(obj["os_high"]),
             dep_critical=int(obj["dep_critical"]),
             dep_high=int(obj["dep_high"]),
+            # OS fields are optional (older box output / non-OS images omit
+            # them) — default to empty so this stays backward compatible.
+            os_family=str(obj.get("os_family") or ""),
+            os_name=str(obj.get("os_name") or ""),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ScanParseError(f"scan summary missing counts: {e}: {obj!r}") from e
