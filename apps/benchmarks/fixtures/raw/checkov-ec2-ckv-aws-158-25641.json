@@ -1,0 +1,20 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-158-25641",
+  "scanner": "checkov-ec2",
+  "source_raw_finding_id": 25641,
+  "pinned_at": "2026-09-22T14:36:21.025971+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "check_id": "CKV_AWS_158",
+    "resource": "aws_cloudwatch_log_group.vulnerable_log_group",
+    "severity": "MEDIUM",
+    "file_path": "/main.tf",
+    "guideline": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-general-policies/ensure-that-cloudwatch-log-group-is-encrypted-by-kms",
+    "check_name": "Ensure that CloudWatch Log Group is encrypted by KMS",
+    "check_type": "terraform",
+    "file_line_range": [
+      144,
+      154
+    ]
+  }
+}

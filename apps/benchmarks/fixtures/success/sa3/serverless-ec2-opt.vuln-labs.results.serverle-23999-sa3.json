@@ -1,0 +1,26 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-23999-sa3",
+  "scanner": "serverless-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-23999.",
+  "source_issue_id": 19798,
+  "input": {
+    "issue": {
+      "id": 19798,
+      "source": "serverless-ec2",
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-log-sensitive-data",
+      "title": "Logging full event payload which may contain sensitive data. Redact PII before logging.",
+      "description": null,
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 32,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

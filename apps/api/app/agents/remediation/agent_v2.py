@@ -165,6 +165,41 @@ def _make_tools(
 
 
 # =============================================================================
+# Response content normalization
+# =============================================================================
+def _extract_text_content(content: Any) -> str:
+    """Normalize LLM response.content to a plain text string.
+
+    OpenAI returns `str`. Claude Sonnet (with cache_control) and Gemini 3.x
+    return a `list` of content blocks like
+      [{"type": "text", "text": "...", "extras": {"signature": "..."}}]
+    where the actual text is inside `.text`. The old code `json.dumps(list)`
+    serialized the WHOLE wrapper structure, which the JSON parser then
+    couldn't dig through — the inner JSON (our RemediationPackage) stayed
+    nested inside a `"text"` key and never got parsed.
+
+    This helper handles both shapes:
+      - str  → returned unchanged (OpenAI path untouched)
+      - list of blocks → concatenate .text values from text-type blocks
+      - fallback → json.dumps (legacy behavior)
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                txt = block.get("text")
+                if isinstance(txt, str) and txt:
+                    parts.append(txt)
+            elif isinstance(block, str):
+                parts.append(block)
+        if parts:
+            return "".join(parts)
+    return json.dumps(content, default=str)
+
+
+# =============================================================================
 # JSON extraction — the LLM's final message may or may not be pure JSON
 # =============================================================================
 def _try_parse_final_answer(
@@ -432,9 +467,7 @@ def _maybe_expand_for_depth(
     # uses raw JSON parsing for the same reason — mirror that shape here.
     try:
         response = llm.invoke(messages + [expand_msg])
-        text = (
-            response.content if isinstance(response.content, str) else json.dumps(response.content)
-        )
+        text = _extract_text_content(response.content)
         expanded = _try_parse_final_answer(
             text,
             run_id=run_id,
@@ -545,9 +578,7 @@ def _maybe_expand_for_placeholders(
 
     try:
         response = llm.invoke(messages + [expand_msg])
-        text = (
-            response.content if isinstance(response.content, str) else json.dumps(response.content)
-        )
+        text = _extract_text_content(response.content)
         expanded = _try_parse_final_answer(
             text,
             run_id=run_id,
@@ -1452,7 +1483,7 @@ def run_agentic_planner(
             # Floor met OR budget nearly out — accept the finish attempt
             final_text = response.content or ""
             parsed = _try_parse_final_answer(
-                final_text if isinstance(final_text, str) else json.dumps(final_text),
+                _extract_text_content(final_text),
                 run_id=run_id,
                 emit_fn=emit_fn,
                 context="loop-final",
@@ -1554,15 +1585,61 @@ def _synthesize_backup(
             )
         ]
         response = llm.invoke(synth_messages)
-        text = (
-            response.content if isinstance(response.content, str) else json.dumps(response.content)
-        )
+        text = _extract_text_content(response.content)
         result = _try_parse_final_answer(
             text,
             run_id=run_id,
             emit_fn=emit_fn,
             context="synthesis-backup",
         )
+        if result is None:
+            # Claude-only repair-retry: Sonnet sometimes produces JSON that
+            # parses but fails Pydantic validation. One extra round-trip with
+            # the actual validation error in the prompt lets the model fix the
+            # specific field it got wrong. Gated by model name so OpenAI /
+            # Gemini paths are untouched. Costs ≈ $0.015 per repair attempt.
+            model_name = str(getattr(llm, "model", "")).lower()
+            if "claude" in model_name:
+                try:
+                    LLMRemediationOutput.model_validate_json(text.strip())
+                    validation_err = "(no validation error — JSON parse failed instead)"
+                except Exception as ve:  # noqa: BLE001
+                    validation_err = f"{type(ve).__name__}: {str(ve)[:600]}"
+                repair_messages = synth_messages + [
+                    response,
+                    HumanMessage(
+                        content=(
+                            "Your previous JSON failed schema validation with the "
+                            f"following error:\n\n{validation_err}\n\n"
+                            "Produce the RemediationPackage JSON again, correcting ONLY "
+                            "the fields the error points to. Keep every other field "
+                            "exactly as before. Output ONLY the JSON object, no prose."
+                        )
+                    ),
+                ]
+                try:
+                    repair_response = llm.invoke(repair_messages)
+                    repair_text = _extract_text_content(repair_response.content)
+                    result = _try_parse_final_answer(
+                        repair_text,
+                        run_id=run_id,
+                        emit_fn=emit_fn,
+                        context="synthesis-repair",
+                    )
+                    if result is not None:
+                        emit_fn(
+                            run_id,
+                            "sub-agent-3",
+                            "INFO",
+                            "Claude repair-retry succeeded after synthesis-backup failed",
+                        )
+                except Exception as e:  # noqa: BLE001
+                    emit_fn(
+                        run_id,
+                        "sub-agent-3",
+                        "ERROR",
+                        f"Claude repair-retry failed: {type(e).__name__}: {str(e)[:200]}",
+                    )
         if result is None:
             emit_fn(
                 run_id,

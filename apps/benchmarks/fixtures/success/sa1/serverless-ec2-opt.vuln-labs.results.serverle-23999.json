@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-23999",
+  "scanner": "serverless-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 23999,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "Logging full event payload which may contain sensitive data. Redact PII before logging.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-log-sensitive-data",
+    "end_line": 32,
+    "metadata": {
+      "cwe": [
+        "CWE-532"
+      ],
+      "owasp": [
+        "A09:2021 - Security Logging and Monitoring Failures"
+      ]
+    },
+    "severity": "WARNING",
+    "start_line": 32
+  }
+}

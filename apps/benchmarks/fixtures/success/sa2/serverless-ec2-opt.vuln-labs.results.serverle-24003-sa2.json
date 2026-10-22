@@ -1,0 +1,40 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24003-sa2",
+  "scanner": "serverless-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-24003.",
+  "source_issue_id": 19786,
+  "input": {
+    "issue": {
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-command-injection",
+      "title": "Command injection via os.system with concatenated user input in Lambda handler.",
+      "description": "Use subprocess with a list of arguments.",
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 110,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

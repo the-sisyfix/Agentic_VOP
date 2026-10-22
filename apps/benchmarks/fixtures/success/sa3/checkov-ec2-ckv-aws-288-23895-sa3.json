@@ -1,0 +1,26 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-288-23895-sa3",
+  "scanner": "checkov-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv-aws-288-23895.",
+  "source_issue_id": 19600,
+  "input": {
+    "issue": {
+      "id": 19600,
+      "source": "checkov-ec2",
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "CKV_AWS_288",
+      "title": "Ensure IAM policies does not allow data exfiltration",
+      "description": null,
+      "package": {},
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_iam_policy.vulnerable_policy"
+      }
+    },
+    "asset": {},
+    "family": "public_exposure"
+  }
+}

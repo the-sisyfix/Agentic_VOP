@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24002",
+  "scanner": "serverless-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 24002,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "Insecure deserialization via pickle.loads on user-supplied Lambda event data. Use json.loads or a safe format.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-insecure-deserialization",
+    "end_line": 96,
+    "metadata": {
+      "cwe": [
+        "CWE-502"
+      ],
+      "owasp": [
+        "A08:2021 - Software and Data Integrity Failures"
+      ]
+    },
+    "severity": "ERROR",
+    "start_line": 96
+  }
+}

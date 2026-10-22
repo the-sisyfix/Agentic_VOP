@@ -1,0 +1,26 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24002-sa3",
+  "scanner": "serverless-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-24002.",
+  "source_issue_id": 19791,
+  "input": {
+    "issue": {
+      "id": 19791,
+      "source": "serverless-ec2",
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-insecure-deserialization",
+      "title": "Insecure deserialization via pickle.loads on user-supplied Lambda event data. Use json.loads or a safe format.",
+      "description": null,
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 96,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

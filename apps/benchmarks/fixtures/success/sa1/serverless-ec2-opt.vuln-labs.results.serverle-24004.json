@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24004",
+  "scanner": "serverless-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 24004,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "Weak randomness in Lambda handler. Use secrets module for security tokens.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-weak-random",
+    "end_line": 124,
+    "metadata": {
+      "cwe": [
+        "CWE-330"
+      ],
+      "owasp": [
+        "A02:2021 - Cryptographic Failures"
+      ]
+    },
+    "severity": "WARNING",
+    "start_line": 124
+  }
+}

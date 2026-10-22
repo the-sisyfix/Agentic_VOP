@@ -1,0 +1,20 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-289-23890",
+  "scanner": "checkov-ec2",
+  "agent": "sa1",
+  "source_raw_finding_id": 23890,
+  "notes": "Success-chain pinned by pick_success_fixtures.py",
+  "raw": {
+    "check_id": "CKV_AWS_289",
+    "resource": "aws_iam_policy.vulnerable_policy",
+    "severity": "MEDIUM",
+    "file_path": "/main.tf",
+    "guideline": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-iam-policies/bc-aws-289",
+    "check_name": "Ensure IAM policies does not allow permissions management / resource exposure without constraints",
+    "check_type": "terraform",
+    "file_line_range": [
+      117,
+      136
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "fixture_id": "checkov-ec2-ckv2-aws-62-25646-sa2",
+  "scanner": "checkov-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv2-aws-62-25646.",
+  "source_issue_id": 22220,
+  "input": {
+    "issue": {
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "CKV2_AWS_62",
+      "title": "Ensure S3 buckets should have event notifications enabled",
+      "description": null,
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_s3_bucket.vulnerable_bucket"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

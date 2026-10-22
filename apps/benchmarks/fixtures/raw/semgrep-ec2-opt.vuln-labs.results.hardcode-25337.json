@@ -1,0 +1,23 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.hardcode-25337",
+  "scanner": "semgrep-ec2",
+  "source_raw_finding_id": 25337,
+  "pinned_at": "2026-09-16T22:17:56.644695+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "path": "/opt/vuln-labs/appsec-lab/auth.py",
+    "message": "Hardcoded credential or secret in source code. Use environment variables.\n",
+    "rule_id": "opt.vuln-labs.results.hardcoded-secret-key",
+    "end_line": 7,
+    "metadata": {
+      "cwe": [
+        "CWE-798"
+      ],
+      "owasp": [
+        "A07:2021 - Identification and Authentication Failures"
+      ]
+    },
+    "severity": "WARNING",
+    "start_line": 7
+  }
+}

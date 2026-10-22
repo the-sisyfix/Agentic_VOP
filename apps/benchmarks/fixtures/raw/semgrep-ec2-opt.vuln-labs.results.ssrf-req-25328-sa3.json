@@ -1,0 +1,26 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.ssrf-req-25328-sa3",
+  "scanner": "semgrep-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture semgrep-ec2-opt.vuln-labs.results.ssrf-req-25328.",
+  "source_issue_id": 21885,
+  "input": {
+    "issue": {
+      "id": 21885,
+      "source": "semgrep-ec2",
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.ssrf-requests-get",
+      "title": "SSRF \u2014 user-controlled URL passed to requests.get",
+      "description": "Validate against an allowlist.",
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/appsec-lab/api_client.py",
+        "line": 13,
+        "project": "/opt/vuln-labs/appsec-lab/api_client.py"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

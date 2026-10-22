@@ -1,0 +1,40 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-7-24228-sa2",
+  "scanner": "checkov-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture checkov-ec2-ckv-aws-7-24228.",
+  "source_issue_id": 20234,
+  "input": {
+    "issue": {
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "CKV_AWS_7",
+      "title": "Ensure rotation for customer created CMKs is enabled",
+      "description": null,
+      "asset_identity": {
+        "file": "/main.tf",
+        "project": "/main.tf",
+        "resource": "aws_kms_key.vulnerable_key"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

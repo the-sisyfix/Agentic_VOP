@@ -1,0 +1,40 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.sql-inje-23696-sa2",
+  "scanner": "semgrep-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture semgrep-ec2-opt.vuln-labs.results.sql-inje-23696.",
+  "source_issue_id": 19349,
+  "input": {
+    "issue": {
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.sql-injection-fstring-variable",
+      "title": "SQL injection via string formatting in variable. Use parameterized queries.",
+      "description": null,
+      "asset_identity": {
+        "file": "/opt/vuln-labs/appsec-lab/app.py",
+        "line": 43,
+        "project": "/opt/vuln-labs/appsec-lab/app.py"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}

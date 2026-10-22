@@ -1,0 +1,11 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24004",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "serverless-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.serverless-weak-random",
+    "severity": "medium",
+    "title_contains": "randomness",
+    "description_present": true
+  }
+}

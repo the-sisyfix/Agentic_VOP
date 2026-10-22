@@ -46,6 +46,17 @@ from .safety import validate_command
 from .tools.remote_exec import RemoteExecutor
 
 
+# ─── Benchmark-only model override for the preflight rewriter LLM ─────────
+# The SA-4 preflight path has exactly one LLM call. Production hardcodes
+# gpt-4o. The benchmark pipeline flips this to e.g. claude-sonnet-4-6 when
+# measuring the Claude stack end-to-end. When this list contains None (the
+# default), behavior is identical to pre-override production code.
+#
+# Mutate as `preflight._PREFLIGHT_MODEL_OVERRIDE[0] = "claude-sonnet-4-6"`
+# before calling run_fixer(), then reset to None in a try/finally.
+_PREFLIGHT_MODEL_OVERRIDE: list[str | None] = [None]
+
+
 # ============================================================================
 # Hallucination guard for no-op rewrites
 # ============================================================================
@@ -381,7 +392,7 @@ class PreflightRewrite(BaseModel):
     reason: str = Field(
         ...,
         min_length=10,
-        max_length=500,
+        max_length=1500,
         description=(
             "Concrete evidence-based explanation citing the env snapshot "
             "(e.g. 'attached policies list has no AmazonS3KMSAccess, and step "
@@ -399,7 +410,7 @@ class PreflightRewrite(BaseModel):
     original_step_preview: str = Field(
         ...,
         min_length=1,
-        max_length=300,
+        max_length=2000,
         description="First 200 chars of the step being rewritten, for audit trail",
     )
     new_step: str = Field(
@@ -609,7 +620,7 @@ def run_preflight_rewrite(
             agent="sub-agent-4",
             schema=PreflightRewritePlan,
             messages=messages,
-            attempts=[(0.1, "gpt-4o", 3000)],
+            attempts=[(0.1, _PREFLIGHT_MODEL_OVERRIDE[0] or "gpt-4o", 3000)],
             emit_fn=emit_fn,
         )
     except Exception as e:  # noqa: BLE001

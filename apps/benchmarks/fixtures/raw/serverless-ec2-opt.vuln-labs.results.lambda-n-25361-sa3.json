@@ -1,0 +1,26 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.lambda-n-25361-sa3",
+  "scanner": "serverless-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.lambda-n-25361.",
+  "source_issue_id": 21920,
+  "input": {
+    "issue": {
+      "id": 21920,
+      "source": "serverless-ec2",
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.lambda-no-dlq",
+      "title": "Lambda function has no dead letter queue configured",
+      "description": "Failed events will be lost.",
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/main.tf",
+        "line": 118,
+        "project": "/opt/vuln-labs/serverless-lab/main.tf"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

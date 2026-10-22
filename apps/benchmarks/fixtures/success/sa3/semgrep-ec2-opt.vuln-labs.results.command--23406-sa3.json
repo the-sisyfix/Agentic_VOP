@@ -1,0 +1,26 @@
+{
+  "fixture_id": "semgrep-ec2-opt.vuln-labs.results.command--23406-sa3",
+  "scanner": "semgrep-ec2",
+  "agent": "sa3",
+  "notes": "Derived from SA-1 fixture semgrep-ec2-opt.vuln-labs.results.command--23406.",
+  "source_issue_id": 18964,
+  "input": {
+    "issue": {
+      "id": 18964,
+      "source": "semgrep-ec2",
+      "severity": "High",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.command-injection-subprocess-shell",
+      "title": "Command injection risk \u2014 subprocess.run with shell=True",
+      "description": "Use shell=False and pass arguments as a list.",
+      "package": {},
+      "asset_identity": {
+        "file": "/opt/vuln-labs/appsec-lab/api_client.py",
+        "line": 34,
+        "project": "/opt/vuln-labs/appsec-lab/api_client.py"
+      }
+    },
+    "asset": {},
+    "family": "injection"
+  }
+}

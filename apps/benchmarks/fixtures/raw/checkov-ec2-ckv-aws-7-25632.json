@@ -1,0 +1,20 @@
+{
+  "fixture_id": "checkov-ec2-ckv-aws-7-25632",
+  "scanner": "checkov-ec2",
+  "source_raw_finding_id": 25632,
+  "pinned_at": "2026-09-22T14:36:21.025971+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "check_id": "CKV_AWS_7",
+    "resource": "aws_kms_key.vulnerable_key",
+    "severity": "MEDIUM",
+    "file_path": "/main.tf",
+    "guideline": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/logging-8",
+    "check_name": "Ensure rotation for customer created CMKs is enabled",
+    "check_type": "terraform",
+    "file_line_range": [
+      96,
+      105
+    ]
+  }
+}

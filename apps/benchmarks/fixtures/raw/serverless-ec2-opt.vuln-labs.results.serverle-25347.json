@@ -1,0 +1,23 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-25347",
+  "scanner": "serverless-ec2",
+  "source_raw_finding_id": 25347,
+  "pinned_at": "2026-09-17T02:48:19.813897+00:00",
+  "notes": "Pinned by pick_fixtures.py \u2014 do not edit raw by hand.",
+  "raw": {
+    "path": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+    "message": "Hardcoded credential in Lambda source code. Use environment variables or Secrets Manager.\n",
+    "rule_id": "opt.vuln-labs.results.serverless-hardcoded-secret",
+    "end_line": 20,
+    "metadata": {
+      "cwe": [
+        "CWE-798"
+      ],
+      "owasp": [
+        "A07:2021 - Identification and Authentication Failures"
+      ]
+    },
+    "severity": "ERROR",
+    "start_line": 20
+  }
+}

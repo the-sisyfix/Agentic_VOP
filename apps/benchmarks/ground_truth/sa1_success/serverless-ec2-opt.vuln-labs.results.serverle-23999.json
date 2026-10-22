@@ -1,0 +1,11 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-23999",
+  "notes": "Auto-derived from raw payload.",
+  "expected": {
+    "source": "serverless-ec2",
+    "source_vuln_id": "opt.vuln-labs.results.serverless-log-sensitive-data",
+    "severity": "medium",
+    "title_contains": "logging",
+    "description_present": true
+  }
+}

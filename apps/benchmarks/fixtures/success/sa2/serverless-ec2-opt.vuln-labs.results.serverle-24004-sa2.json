@@ -1,0 +1,40 @@
+{
+  "fixture_id": "serverless-ec2-opt.vuln-labs.results.serverle-24004-sa2",
+  "scanner": "serverless-ec2",
+  "agent": "sa2",
+  "notes": "Derived from SA-1 fixture serverless-ec2-opt.vuln-labs.results.serverle-24004.",
+  "source_issue_id": 19795,
+  "input": {
+    "issue": {
+      "severity": "Medium",
+      "cve_id": null,
+      "source_vuln_id": "opt.vuln-labs.results.serverless-weak-random",
+      "title": "Weak randomness in Lambda handler. Use secrets module for security tokens.",
+      "description": null,
+      "asset_identity": {
+        "file": "/opt/vuln-labs/serverless-lab/lambda_function.py",
+        "line": 124,
+        "project": "/opt/vuln-labs/serverless-lab/lambda_function.py"
+      },
+      "package": null
+    },
+    "enrichment": {
+      "epss_score": null,
+      "epss_percentile": null,
+      "in_kev": false,
+      "nvd": {},
+      "mitre": {
+        "cwe": {},
+        "capec": [],
+        "attack": []
+      },
+      "asset": {}
+    },
+    "scoring": {
+      "derived_risk": null,
+      "priority": null,
+      "policy_version": "benchmark-stub",
+      "components": {}
+    }
+  }
+}
