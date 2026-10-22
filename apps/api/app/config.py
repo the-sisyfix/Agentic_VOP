@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     # AWS region for env2 + SSM RunCommand calls.
     aws_region: str = "us-east-1"
 
+    # --- Image Hardening (separate feature; see app/services/image_hardening) ---
+    # Core runtime config for the hardening pipeline. These are permanent
+    # production settings (not test-only) — only the VALUES change per
+    # environment. The registry can also be overridden per-request via the
+    # trigger's target_registry (orchestrator._with_defaults); the setting is
+    # the fallback/default. The build-instance id is the MVP/fallback path and
+    # coexists with the future ephemeral-box seam (resolve_build_instance).
+    hardening_build_instance_id: str = ""  # dedicated build EC2 (SSM-managed)
+    hardening_ecr_repository_url: str = ""  # ECR repo URL (push target, no tag)
+    hardening_sbom_bucket: str = ""  # S3 bucket for SBOM artifacts
+
     # --- HITL v2 Git-native review (Phase B, side experiment) ------------
     # All optional. When any of these are empty, the git-review flow is
     # simply unavailable — existing HITL v1 + sandbox review + auto-demo
@@ -102,6 +113,21 @@ class Settings(BaseSettings):
     github_pat: str = ""
     github_repo: str = ""
     github_base_branch: str = "main"
+
+    # --- GitHub App auth for image-hardening auto-sign dispatch -----------
+    # Preferred over github_pat for programmatically dispatching the signing
+    # workflow (short-lived installation tokens, no long-lived PAT). All
+    # optional: when any is empty, auto-dispatch falls back to github_pat, and
+    # if that is also empty, signing is skipped gracefully (dispatch manually).
+    #
+    # github_app_id                      — the App's numeric id
+    # github_app_installation_id         — the installation id on the target repo
+    # github_app_private_key_secret_arn  — AWS Secrets Manager ARN/name holding
+    #   the App private key (.pem). The KEY VALUE is never in env/config — only
+    #   this reference; the backend fetches it from Secrets Manager at dispatch.
+    github_app_id: str = ""
+    github_app_installation_id: str = ""
+    github_app_private_key_secret_arn: str = ""
 
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive

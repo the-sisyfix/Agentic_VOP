@@ -54,6 +54,10 @@ dependencies = [
     # Transitive via langgraph/fsspec consumers. Pinned to remediate CVE-2026-104851
     # (ReferenceFileSystem Kerchunk JSON parsing issue); fixed in 2026.6.0.
     "fsspec>=2026.6.0",
+    # Transitive via requests/boto3/httpx/supabase. Pinned to remediate
+    # PYSEC-2026-4320 (compromised emSign/eMudhra root CA in the bundled CA
+    # store); fixed in 2026.10.18.
+    "certifi>=2026.10.18",
     # Transitive via aiohttp/langchain stack. Pinned to remediate CVE-2026-104874
     # (reference leak in items-view union/subtraction, C extension); fixed in 6.9.1.
     "multidict>=6.9.1",

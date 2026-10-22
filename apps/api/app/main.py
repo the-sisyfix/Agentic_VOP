@@ -47,6 +47,11 @@ from .models import (
     CreateTicketRequest,
     TicketResponse,
 )
+from .models import (
+    HardeningRunCreated,
+    HardeningTriggerRequest,
+)
+from .services.image_hardening.orchestrator import run_hardening
 
 # Don't accept a new run for the same scanner-set if there's already an
 # in-flight (queued or running) run created within this window. Stops
@@ -105,6 +110,36 @@ async def _start_fix_run_reaper() -> None:
             await asyncio.sleep(_REAPER_INTERVAL_S)
 
     asyncio.create_task(_loop())
+
+
+@app.on_event("startup")
+async def _wire_hardening_logger() -> None:
+    """Surface image-hardening pipeline logs under uvicorn.
+
+    The orchestrator logs intake counts, run start/finish, etc. via
+    logging.getLogger("image_hardening"). Without a handler those INFO records
+    fall through to the root logger (default level WARNING) and never show in
+    the uvicorn console. We attach uvicorn's own handlers so hardening logs
+    appear alongside the rest, at INFO. Idempotent + fail-open: never breaks
+    startup, and does not alter any other logger's configuration.
+    """
+    import logging  # noqa: PLC0415
+
+    try:
+        uv = logging.getLogger("uvicorn")
+        target = logging.getLogger("image_hardening")
+        target.setLevel(logging.INFO)
+        # Reuse uvicorn's handlers so formatting/stream match the rest of the
+        # server output. Only attach if not already present (idempotent across
+        # the --reload worker restarts).
+        if uv.handlers:
+            existing = set(target.handlers)
+            for h in uv.handlers:
+                if h not in existing:
+                    target.addHandler(h)
+            target.propagate = False  # avoid double-logging via root
+    except Exception:  # noqa: BLE001, S110
+        pass
 
 
 @app.exception_handler(Exception)
@@ -204,6 +239,73 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
         event_id=row["event_id"],
         status=row["status"],
     )
+
+
+# =============================================================================
+# Image Hardening (separate feature — own table, own pipeline, no scanner link)
+# =============================================================================
+@app.post("/hardening/trigger", response_model=HardeningRunCreated, status_code=201)
+def trigger_hardening(
+    payload: HardeningTriggerRequest, background_tasks: BackgroundTasks
+) -> HardeningRunCreated:
+    """Start an image-hardening run (build -> scan gate -> push -> SBOM ->
+    optional auto-sign) on the dedicated build EC2.
+
+    Writes to public.hardening_runs only — not linked to issues / packages /
+    fix_runs. Runs as a background task; returns the hardening_run id to poll.
+    """
+    from .services.image_hardening.orchestrator import create_run_record  # noqa: PLC0415
+
+    sb = supabase_admin()
+
+    # Create the run row synchronously (setup checks + a real id to return).
+    # A RuntimeError here (no build instance / concurrent run) → 409/500 before
+    # we dispatch anything.
+    try:
+        run_id = create_run_record(
+            source_image_ref=payload.source_image_ref,
+            target_registry=payload.target_registry,
+            published_tag=payload.published_tag,
+            auto_sign=payload.auto_sign,
+            mode=payload.mode,
+            sb=sb,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    def _run() -> None:
+        try:
+            run_hardening(
+                run_id=run_id,
+                source_image_ref=payload.source_image_ref,
+                target_registry=payload.target_registry,
+                published_tag=payload.published_tag,
+                auto_sign=payload.auto_sign,
+                mode=payload.mode,
+                dockerfile_path=payload.dockerfile_path,
+                build_directory=payload.build_directory,
+                sb=sb,
+            )
+        except Exception:  # noqa: BLE001
+            import logging  # noqa: PLC0415
+
+            logging.getLogger("image_hardening").exception(
+                "hardening_run #%s background task failed", run_id
+            )
+
+    background_tasks.add_task(_run)
+    return HardeningRunCreated(hardening_run_id=run_id, status="queued")
+
+
+@app.get("/hardening/runs/{hardening_run_id}")
+def get_hardening_run_status(hardening_run_id: int) -> dict:
+    """Fetch one hardening_runs row (for the UI to poll). public schema only."""
+    from .services.image_hardening.persistence import get_hardening_run  # noqa: PLC0415
+
+    row = get_hardening_run(supabase_admin(), hardening_run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"hardening_run #{hardening_run_id} not found")
+    return row
 
 
 @app.post("/agents/trigger_demo", response_model=RunCreated, status_code=201)
