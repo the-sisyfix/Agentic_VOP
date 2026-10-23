@@ -297,6 +297,7 @@ def classify_finding(issue: dict, raw: dict | None = None) -> Family:
     #   - trivy-os / trivy-os-al2 / tenable / qualys → apt/yum upgrade on host
     if source in (
         "trivy-image",
+        "trivy-image-php",
         "trivy-os",
         "trivy-os-al2",
         "snyk-container",
