@@ -20,6 +20,14 @@ Configuration (all under `connection_registry.metadata`):
                           Defaults to "*.json".
   max_zip_bytes      : maximum allowed ZIP response size in bytes.
                           Defaults to 104857600 (100 MB).
+  pkg_name_filter    : comma-separated package-name substrings; keep only
+                          findings whose package name contains one. Optional.
+  vuln_id_filter     : comma-separated vulnerability IDs (e.g.
+                          "CVE-2026-109618,CVE-2026-109619"); keep only findings
+                          whose vuln id matches one exactly (case-insensitive).
+                          Optional.
+  max_findings       : cap on how many raw findings are returned (head slice).
+                          Applied after the filters above. Optional.
 
 Locating the array uses the shared three-tier fallback in `_shape_utils`:
 explicit path → common-key auto-detect → LLM inference (cached).
@@ -147,6 +155,33 @@ def fetch(
                         row.get("PkgName") or row.get("pkg_name") or row.get("pkgName") or ""
                     ).lower()
                 if any(f in pkg for f in filters):
+                    filtered.append(row)
+            rows = filtered
+
+    # Optional filter — `metadata.vuln_id_filter` is a comma-separated list of
+    # vulnerability IDs (e.g. "CVE-2026-109618,CVE-2026-109619"). When set, only
+    # findings whose vuln id matches one of these (exact, case-insensitive) are
+    # kept. Applied AFTER pkg_name_filter and BEFORE the cap, so the RIGHT
+    # findings survive the max_findings slice. Matching is exact on the full id
+    # (not substring) to avoid accidental collisions between CVE numbers. Use
+    # for image scanners where only specific CVEs matter for the demo. When the
+    # key is absent, this block is a no-op and behavior is unchanged.
+    vuln_id_filter_str = metadata.get("vuln_id_filter")
+    if vuln_id_filter_str and isinstance(rows, list):
+        wanted = {v.strip().lower() for v in vuln_id_filter_str.split(",") if v.strip()}
+        if wanted:
+            filtered = []
+            for row in rows:
+                vid = ""
+                if isinstance(row, dict):
+                    vid = (
+                        row.get("vuln_id")
+                        or row.get("VulnerabilityID")
+                        or row.get("vulnerability_id")
+                        or row.get("cve_id")
+                        or ""
+                    )
+                if str(vid).strip().lower() in wanted:
                     filtered.append(row)
             rows = filtered
 
