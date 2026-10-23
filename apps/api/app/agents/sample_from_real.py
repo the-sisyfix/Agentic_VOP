@@ -83,6 +83,7 @@ _SOURCE_SCOOPS: dict[str, int] = {
     "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
     "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
     "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
+    "trivy-image-php-ec2": 20,  # PHP image CVEs incl. PHP2Shell (per-finding — no batching)
     "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
     "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
     "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)

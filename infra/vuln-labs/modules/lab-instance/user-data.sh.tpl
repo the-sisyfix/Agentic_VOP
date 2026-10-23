@@ -166,6 +166,18 @@ cd /opt/vuln-labs/python-image-lab
 timeout 300 docker build -t vuln-python-image:latest . || echo "WARNING: python-image-lab docker build timed out or failed"
 
 # =============================================================================
+# 3d. PHP Lab — Debian 12 + apt-pinned php8.2 (for Trivy Image)
+#     Produces the PHP2Shell OS-package CVEs (CVE-2026-109618/109619) plus
+#     other Debian CVEs. Dockerfile fetched from GitHub to keep user-data
+#     under the 16KB limit (same pattern as scan-server.py / cspm template).
+# =============================================================================
+mkdir -p /opt/vuln-labs/php-image-lab
+curl -fsSL "https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/php-image-lab/Dockerfile" \
+  -o /opt/vuln-labs/php-image-lab/Dockerfile
+cd /opt/vuln-labs/php-image-lab
+timeout 300 docker build -t vuln-php-image:latest . || echo "WARNING: php-image-lab docker build timed out or failed"
+
+# =============================================================================
 # 4. CSPM Lab — Vulnerable Terraform (applied as real AWS resources)
 #    Creates intentionally misconfigured S3 bucket + Security Group + more.
 #    SA4 will later fix these by editing the .tf and re-applying.
