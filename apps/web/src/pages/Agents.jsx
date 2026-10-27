@@ -323,6 +323,21 @@ export default function Agents() {
     },
   })
 
+  const handleResetPhp = () => runReset({
+    label: 'PHP',
+    endpoint: '/admin/env2/reset-php',
+    confirmMsg:
+      'Reset PHP image lab to the vulnerable baseline (brings PHP2Shell CVEs back)?\n\n' +
+      'Covers scanner: trivy-image-php-ec2 (CVE-2026-109618 / CVE-2026-109619).\n\n' +
+      'Re-fetches Dockerfile from GitHub main + docker build --no-cache. Takes ~3-5 minutes.\n' +
+      'Do not trigger a demo run during this.',
+    successFmt: (body) => {
+      const imgs = (body.images_reset || []).length
+      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
+      return `✅ PHP reset — ${imgs} image(s)${secs}`
+    },
+  })
+
   // Auto-dismiss the reset toast after 8s so it doesn't cover the trace
   useEffect(() => {
     if (!resetToast) return
@@ -634,6 +649,7 @@ export default function Agents() {
                 { label: 'Images', onClick: handleResetImages, title: 'Rebuild all 3 image labs (infra + java + python) — ~2-3 min' },
                 { label: 'AppSec', onClick: handleResetAppSec, title: 'Restore appsec-lab files (semgrep + trivy-fs) — ~10s' },
                 { label: 'Serverless', onClick: handleResetServerless, title: 'Restore serverless-lab files (lambda + main.tf) — ~10s' },
+                { label: 'PHP', onClick: handleResetPhp, title: 'Rebuild PHP image lab (trivy-image-php-ec2) — ~3-5 min' },
               ].map(({ label, onClick, title }) => {
                 const isMe = resettingLabel === label
                 const busyBlocked = Boolean(env2Busy?.busy) && !isMe
