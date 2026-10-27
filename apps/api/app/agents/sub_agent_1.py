@@ -30,6 +30,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..config import settings
 from ..db import supabase_admin
+from ..leases import LeaseTimeout, hold_lease
 from ..models import LLMNormalizedIssue
 from .connectors import fetch_raw_rows
 from .llm import invoke_structured_with_retry
@@ -181,10 +182,29 @@ def extract_all_vectors_from_raw(raw: dict) -> list[str]:
     return found
 
 
+def _advance_watermark(sb, tool: str, new_watermark: str) -> None:
+    """Move connection_registry.last_fetched_at forward to `new_watermark`, never back.
+
+    The per-scanner lease in run_fetch already keeps two fetches from
+    overlapping; this conditional UPDATE is the backstop in case one does
+    (e.g. a lease lost to a long stall): a run that started earlier but
+    finished later can't roll the watermark back over a newer one.
+    """
+    sb.table("connection_registry").update({"last_fetched_at": new_watermark}).eq("tool", tool).or_(
+        f'last_fetched_at.is.null,last_fetched_at.lt."{new_watermark}"'
+    ).execute()
+
+
 def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
     """Read raw rows from the connector, normalize each via the LLM, insert canonical Issues.
 
     Returns (count of issues inserted, token_totals dict).
+
+    Only one fetch per scanner runs at a time (lease `sa1:<schema>:<tool>`).
+    A second trigger for the same scanner waits for the first to finish,
+    then re-reads the watermark the first one advanced and fetches only
+    what's newer — usually nothing — instead of fetching the same window
+    twice.
 
     Note on token totals: LangChain emits token usage via the
     `_TokenUsageCallback` in `llm.py` (one TOKEN_USAGE trace event per
@@ -195,8 +215,51 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
     """
     sb = supabase_admin()
 
+    def _on_wait(holder: dict | None) -> None:
+        emit_trace(
+            run_id,
+            "sub-agent-1",
+            "MESSAGE",
+            f"⏳ Another run is already fetching from {tool} "
+            f"({(holder or {}).get('label') or 'unknown run'}). Waiting for it to finish "
+            f"so the two don't fetch the same rows…",
+        )
+
+    def _check_abort() -> None:
+        if is_cancellation_requested(run_id):
+            raise RunCancelledError(f"Run cancelled while waiting to fetch from {tool}")
+
+    try:
+        with hold_lease(
+            f"sa1:{settings.db_schema}:{tool}",
+            label=f"agent_run {run_id}",
+            on_wait=_on_wait,
+            check_abort=_check_abort,
+        ) as waited_s:
+            if waited_s:
+                # The other run advanced the watermark — fetch from there, not
+                # from the stale copy master.py read before we waited.
+                fresh = (
+                    sb.table("connection_registry")
+                    .select("last_fetched_at")
+                    .eq("tool", tool)
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if fresh:
+                    registry_entry = {**registry_entry, **fresh[0]}
+            return _run_fetch_locked(sb, run_id, tool, registry_entry)
+    except LeaseTimeout as e:
+        emit_trace(run_id, "sub-agent-1", "ERROR", f"Gave up waiting to fetch from {tool}: {e}")
+        raise
+
+
+def _run_fetch_locked(sb, run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
+    """Body of run_fetch — executed only while the scanner's SA-1 lease is held."""
     last_fetched_at = registry_entry.get("last_fetched_at")
-    fetch_started_at = datetime.now(UTC).isoformat()
+    fetch_started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     metadata = registry_entry.get("metadata") or {}
     connector_type = metadata.get("connector_type", "supabase_stub")
@@ -231,9 +294,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
 
     if not raw_rows:
         # Still advance the watermark so the next run also looks for new rows.
-        sb.table("connection_registry").update({"last_fetched_at": fetch_started_at}).eq(
-            "tool", tool
-        ).execute()
+        _advance_watermark(sb, tool, fetch_started_at)
 
         emit_trace(
             run_id,
@@ -413,9 +474,7 @@ def run_fetch(run_id: str, tool: str, registry_entry: dict) -> tuple[int, dict]:
     # Only do this if we successfully processed at least some rows — if the entire
     # batch failed, leave the watermark alone so a retry sees the same data.
     if inserted > 0:
-        sb.table("connection_registry").update({"last_fetched_at": fetch_started_at}).eq(
-            "tool", tool
-        ).execute()
+        _advance_watermark(sb, tool, fetch_started_at)
 
     emit_trace(
         run_id,

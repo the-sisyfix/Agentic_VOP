@@ -15,10 +15,10 @@ Two entry points:
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime
 from typing import Any
 
+from ...leases import LeaseTimeout, hold_lease
 from .config import FixerConfig, load_config_from_settings
 from .models import (
     FixContext,
@@ -27,7 +27,6 @@ from .models import (
 )
 from .preflight import run_preflight_rewrite
 from .persistence import (
-    any_concurrent_run,
     create_fix_run,
     finalize_fix_run,
     set_backup_reference,
@@ -43,22 +42,25 @@ from .strategies.os_strategy import OSStrategy
 from .watchdog import RunCancelledError, WatchdogTimeout, check_run_health
 
 
-# ─── Process-level env2 dispatch lock ────────────────────────────────────
-# The DB-based `any_concurrent_run` check has a TOCTOU race: multiple
-# background dispatches (typical when a user approves several HITL packages
-# in quick succession) all wake up simultaneously when a prior fix finishes,
-# each pass the "is env2 busy?" SELECT, and each rush to INSERT a new
-# fix_run — putting two SA-4 runs in parallel on env2 despite the design
-# saying "one at a time." Result: both hit env2 contention, both trivy
-# rescans time out, both roll back.
+# ─── env2 dispatch lease ─────────────────────────────────────────────────
+# env2 is one shared sandbox: two SA-4 runs on it at once edit the same
+# main.tf / Dockerfiles, and both trivy rescans time out and roll back.
 #
-# A process-local `threading.Lock` closes the window inside a single
-# uvicorn worker. Combined with the existing DB check (which stays as
-# cross-process backup), dispatches strictly serialize.
-#
-# Multi-worker deploys need a real DB lease (postgres advisory lock or
-# a leases table). Not required for the current single-process backend.
-_ENV2_DISPATCH_LOCK = threading.Lock()
+# Dispatch is serialized by a row in public.run_leases (see app/leases.py),
+# not a process-local threading.Lock + "is any fix_run in flight?" poll.
+# The old pair didn't coordinate across uvicorn workers or hosts, the poll
+# had a SELECT-then-INSERT race, it only looked at the caller's schema (so
+# public and demo runs never saw each other), and a fix_run orphaned by a
+# killed process blocked everyone for 30 minutes. The lease is shared by
+# every process and schema and expires ENV2_LEASE_TTL_S after its holder
+# dies.
+ENV2_LEASE_RESOURCE = "fixer:env2"
+ENV2_LEASE_TTL_S = 120
+# 30 min total wait. Sized to survive a slow SA-4 fix chain (~90s each ×
+# 20 packages = 30 min worst case) so a legitimately long-running fix
+# upstream doesn't cause downstream package casualties.
+ENV2_LEASE_WAIT_MAX_S = 1800
+ENV2_LEASE_POLL_S = 10
 
 
 # =============================================================================
@@ -249,25 +251,60 @@ def run_fixer(
     """
     cfg = config or load_config_from_settings()
 
-    # Serialize env2 dispatches at the PROCESS level — closes the TOCTOU
-    # race between the DB concurrency check below and the create_fix_run
-    # INSERT further down. Even if multiple background tasks reach here
-    # simultaneously (typical when a user approves 5 HITL packages in
-    # quick succession), only one enters at a time. The others block
-    # until this one returns.
-    _lock_acquired_at = utcnow()
-    _ENV2_DISPATCH_LOCK.acquire()
-    try:
-        return _run_fixer_locked(
-            package_id=package_id,
-            agent_run_id=agent_run_id,
-            sb=sb,
-            emit_fn=emit_fn,
-            environment=environment,
-            cfg=cfg,
+    run_kwargs = dict(
+        package_id=package_id,
+        agent_run_id=agent_run_id,
+        sb=sb,
+        emit_fn=emit_fn,
+        environment=environment,
+        cfg=cfg,
+    )
+    if FixerConfig.allow_concurrent_runs:
+        return _run_fixer_locked(**run_kwargs)
+
+    # Serialize env2 dispatches across every process, host and schema. Even
+    # if several background tasks reach here at once (typical when a user
+    # approves 5 HITL packages in quick succession, or two users trigger
+    # pipelines together), only one holds the lease; the rest wait.
+    def _on_wait(holder: dict | None) -> None:
+        emit_fn(
+            agent_run_id,
+            "sub-agent-4",
+            "MESSAGE",
+            f"⏳ env2 shared sandbox is busy — another fix is running "
+            f"({(holder or {}).get('label') or 'unknown'}, since "
+            f"{((holder or {}).get('acquired_at') or '?')[:19]}). Waiting up to "
+            f"{ENV2_LEASE_WAIT_MAX_S}s for it to complete before dispatching this run…",
         )
-    finally:
-        _ENV2_DISPATCH_LOCK.release()
+
+    try:
+        with hold_lease(
+            ENV2_LEASE_RESOURCE,
+            label=f"package #{package_id}, agent_run {agent_run_id}",
+            ttl_s=ENV2_LEASE_TTL_S,
+            wait_max_s=ENV2_LEASE_WAIT_MAX_S,
+            poll_s=ENV2_LEASE_POLL_S,
+            on_wait=_on_wait,
+        ) as waited_s:
+            if waited_s:
+                emit_fn(
+                    agent_run_id,
+                    "sub-agent-4",
+                    "MESSAGE",
+                    f"✓ env2 lock released after {waited_s}s wait — dispatching now.",
+                )
+            return _run_fixer_locked(**run_kwargs)
+    except LeaseTimeout as e:
+        holder = e.holder or {}
+        raise RuntimeError(
+            f"env2 shared sandbox is still busy after waiting {e.waited_s}s. "
+            f"Another fix ({holder.get('label') or 'unknown'}, since "
+            f"{(holder.get('acquired_at') or '?')[:19]}) has been running for a long "
+            f"time. env2 supports one fix at a time — coordinate with "
+            f"whoever is running the other demo, wait a few more minutes, "
+            f"then retry. Run `python scripts/check_env2_status.py` from "
+            f"apps/api to see live state."
+        ) from e
 
 
 def _run_fixer_locked(
@@ -279,7 +316,7 @@ def _run_fixer_locked(
     environment: str,
     cfg: FixerConfig,
 ) -> int:
-    """Body of run_fixer — executed only while _ENV2_DISPATCH_LOCK is held.
+    """Body of run_fixer — executed only while the env2 dispatch lease is held.
 
     HITL v2 "Verified PR" note: packages flagged `git_native_review=True`
     still run the full sandbox lifecycle below (SSM + build + rescan) —
@@ -288,62 +325,6 @@ def _run_fixer_locked(
     the customer's repo (see git_verified_pr.open_verified_pr). That
     hook is best-effort and never gates the sandbox success.
     """
-    # Concurrency lock (DB-side belt-and-suspenders) — env2 is a single
-    # shared sandbox; only one fix_run at a time. This check remains as
-    # cross-process safety for multi-worker deployments even though the
-    # process-level lock in run_fixer already serializes within one worker.
-    if not FixerConfig.allow_concurrent_runs:
-        import time  # noqa: PLC0415 — local import; keeps top-of-file clean
-
-        # 30 min total wait (was 5). Sized to survive a slow SA-4 fix chain
-        # (~90s each × 20 packages = 30 min worst case) so a legitimately
-        # long-running fix upstream doesn't cause downstream package casualties.
-        # Trace we saw: 6 packages of 20 timed out at 300s while a stuck fix_run
-        # from a prior killed uvicorn held the lock. 1800s gives comfortable
-        # headroom even if a real (not stuck) fix run takes its full time.
-        LOCK_WAIT_MAX_S = 1800
-        LOCK_POLL_INTERVAL_S = 10
-        waited_s = 0
-        other = any_concurrent_run(sb)
-        first_wait_notice_sent = False
-
-        while other is not None and waited_s < LOCK_WAIT_MAX_S:
-            if not first_wait_notice_sent:
-                emit_fn(
-                    agent_run_id,
-                    "sub-agent-4",
-                    "MESSAGE",
-                    f"⏳ env2 shared sandbox is busy — another fix_run "
-                    f"(#{other['id']}, package #{other['package_id']}, "
-                    f"status={other['status']}, started {other.get('started_at', '?')[:19]}) "
-                    f"is active. Waiting up to {LOCK_WAIT_MAX_S}s for it to complete "
-                    f"before dispatching this run…",
-                )
-                first_wait_notice_sent = True
-            time.sleep(LOCK_POLL_INTERVAL_S)
-            waited_s += LOCK_POLL_INTERVAL_S
-            other = any_concurrent_run(sb)
-
-        if other is not None:
-            raise RuntimeError(
-                f"env2 shared sandbox is still busy after waiting {waited_s}s. "
-                f"Another user's fix_run (#{other['id']}, package "
-                f"#{other['package_id']}, status={other['status']}, started "
-                f"{other.get('started_at', '?')[:19]}) has been running for a long "
-                f"time. env2 supports one fix at a time — coordinate with "
-                f"whoever is running the other demo, wait a few more minutes, "
-                f"then retry. Run `python scripts/check_env2_status.py` from "
-                f"apps/api to see live state."
-            )
-
-        if waited_s > 0:
-            emit_fn(
-                agent_run_id,
-                "sub-agent-4",
-                "MESSAGE",
-                f"✓ env2 lock released after {waited_s}s wait — dispatching now.",
-            )
-
     # 1. Load the package
     pkg_row = _load_package(sb, package_id)
     if pkg_row is None:
