@@ -1695,6 +1695,33 @@ def get_demo_run_traces(run_id: str) -> dict:
     return {"traces": resp.data or []}
 
 
+def _resolve_asset_for_demo_issue(iss: dict, asset_rows: list[dict]) -> str | None:
+    """Match an issue's asset_identity against demo.assets using the same
+    keys the real issue_with_asset view checks. Returns the asset's `name`
+    on first match, or None.
+    """
+    identity = iss.get("asset_identity") or {}
+    keys = (
+        identity.get("project"),
+        identity.get("repo"),
+        identity.get("name"),
+        identity.get("os"),
+    )
+    hostname = identity.get("hostname")
+    ipv4 = identity.get("ipv4")
+    for a in asset_rows:
+        aliases = a.get("aliases") or []
+        aname = a.get("name")
+        for k in keys:
+            if k and (aname == k or k in aliases):
+                return aname
+        if hostname and (a.get("hostname") == hostname or hostname in aliases):
+            return aname
+        if ipv4 and a.get("ip_address") == ipv4:
+            return aname
+    return None
+
+
 @app.get("/admin/remediation-packages/demo")
 def list_demo_remediation_packages(
     status: str | None = None,
@@ -1731,7 +1758,7 @@ def list_demo_remediation_packages(
         issue_ids = [p["issue_id"] for p in packages if p.get("issue_id") is not None]
         issue_rows = (
             sb.table("issues")
-            .select("id,asset_identity,public_issue_id")
+            .select("id,source,asset_identity,public_issue_id")
             .in_("id", issue_ids)
             .execute()
             .data
@@ -1744,31 +1771,9 @@ def list_demo_remediation_packages(
             sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
         )
 
-        def _resolve_name(iss: dict) -> str | None:
-            identity = iss.get("asset_identity") or {}
-            keys = (
-                identity.get("project"),
-                identity.get("repo"),
-                identity.get("name"),
-                identity.get("os"),
-            )
-            hostname = identity.get("hostname")
-            ipv4 = identity.get("ipv4")
-            for a in asset_rows:
-                aliases = a.get("aliases") or []
-                aname = a.get("name")
-                for k in keys:
-                    if k and (aname == k or k in aliases):
-                        return aname
-                if hostname and (a.get("hostname") == hostname or hostname in aliases):
-                    return aname
-                if ipv4 and a.get("ip_address") == ipv4:
-                    return aname
-            return None
-
         for pkg in packages:
             iss = issue_by_id.get(pkg.get("issue_id")) or {}
-            pkg["asset_name"] = _resolve_name(iss)
+            pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, asset_rows)
             pkg["public_issue_id"] = iss.get("public_issue_id")
 
     return {"packages": packages}
@@ -1783,7 +1788,31 @@ def get_demo_remediation_package(pkg_id: int) -> dict:
     resp = sb.table("remediation_packages").select("*").eq("id", pkg_id).limit(1).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
-    return resp.data[0]
+    pkg = resp.data[0]
+
+    # Enrich with asset_name + public_issue_id so the drawer never falls back
+    # to "asset-<issue_id>". Uses the same shared resolver as the list endpoint
+    # (includes source → default asset fallback for scanners whose
+    # asset_identity doesn't match any demo.assets row).
+    iss_id = pkg.get("issue_id")
+    if iss_id is not None:
+        iss_rows = (
+            sb.table("issues")
+            .select("source,asset_identity,public_issue_id")
+            .eq("id", iss_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if iss_rows:
+            iss = iss_rows[0]
+            pkg["public_issue_id"] = iss.get("public_issue_id")
+            assets = (
+                sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
+            )
+            pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, assets)
+    return pkg
 
 
 @app.post("/admin/remediation-packages/demo/{pkg_id}/approve")
