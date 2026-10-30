@@ -1580,6 +1580,22 @@ def _reset_files_via_ssm(
     }
 
 
+def _vuln_labs_dir():
+    """Locate infra/vuln-labs. Repo layout: <root>/apps/api/app/main.py
+    (root = parents[3]); container layout: /app/app/main.py with the lab
+    files copied to /app/infra/vuln-labs (root = parents[1]).
+    """
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    for depth in (1, 3):
+        if depth < len(here.parents):
+            cand = here.parents[depth] / "infra" / "vuln-labs"
+            if cand.is_dir():
+                return cand
+    raise HTTPException(status_code=500, detail="infra/vuln-labs not found alongside the API")
+
+
 @app.post("/admin/env2/reset-appsec")
 def reset_env2_appsec() -> dict:
     """Reset appsec-lab source files on env2 to their pristine vulnerable state.
@@ -1592,9 +1608,7 @@ def reset_env2_appsec() -> dict:
     """
     _guard_env2_free_for_reset()
 
-    from pathlib import Path
-
-    repo_dir = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs" / "appsec-lab"
+    repo_dir = _vuln_labs_dir() / "appsec-lab"
     if not repo_dir.is_dir():
         raise HTTPException(status_code=500, detail=f"pristine source dir missing: {repo_dir}")
     src_files = sorted(f for f in repo_dir.iterdir() if f.is_file())
@@ -1631,9 +1645,7 @@ def reset_env2_serverless() -> dict:
     """
     _guard_env2_free_for_reset()
 
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs"
+    repo_root = _vuln_labs_dir()
     py_src = repo_root / "serverless-lab" / "lambda_function.py"
     tf_template = repo_root / "serverless-lab-template.tf"
     if not py_src.is_file():
