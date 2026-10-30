@@ -1,8 +1,8 @@
 services:
   api:
     build:
-      context: apps/api
-      dockerfile: Dockerfile.prod
+      context: .
+      dockerfile: apps/api/Dockerfile.prod
     platform: linux/arm64
     ports:
       - "8000:8000"

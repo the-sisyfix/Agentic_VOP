@@ -1,0 +1,13 @@
+# Build context for the api image is the repo root (see docker-compose.yml).
+# Exclude everything, then allow only what apps/api/Dockerfile.prod COPYs.
+# (apps/web builds with its own context, apps/web, so this file does not affect it.)
+*
+
+!apps/api/pyproject.toml
+!apps/api/app
+!infra/vuln-labs/appsec-lab
+!infra/vuln-labs/serverless-lab
+!infra/vuln-labs/serverless-lab-template.tf
+
+**/__pycache__
+**/*.pyc

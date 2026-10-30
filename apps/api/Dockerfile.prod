@@ -4,7 +4,7 @@ FROM python:3.11-slim AS builder
 WORKDIR /build
 
 # Copy only the dependency manifest first for layer caching
-COPY pyproject.toml ./
+COPY apps/api/pyproject.toml ./
 
 # Install production dependencies (no dev group) into a clean prefix
 RUN pip install --no-cache-dir --prefix=/install .
@@ -26,7 +26,13 @@ RUN useradd --create-home --uid 1000 appuser
 WORKDIR /app
 
 # Copy application source
-COPY app/ ./app/
+COPY apps/api/app/ ./app/
+
+# Pristine lab sources used by the /admin/env2/reset-* endpoints.
+# Only the files those endpoints read are copied (not env*/ or *.pem).
+COPY infra/vuln-labs/appsec-lab/ ./infra/vuln-labs/appsec-lab/
+COPY infra/vuln-labs/serverless-lab/ ./infra/vuln-labs/serverless-lab/
+COPY infra/vuln-labs/serverless-lab-template.tf ./infra/vuln-labs/serverless-lab-template.tf
 
 # Create logs directory writable by appuser
 RUN mkdir -p /app/logs && chown appuser:appuser /app/logs
