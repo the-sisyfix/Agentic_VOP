@@ -38,6 +38,8 @@ resource "aws_instance" "build" {
     cosign_version = var.cosign_version
     syft_version   = var.syft_version
     trivy_version  = var.trivy_version
+    copa_version   = var.copa_version
+    buildkit_image = var.buildkit_image
   })
   user_data_replace_on_change = true
 

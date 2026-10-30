@@ -122,7 +122,34 @@ install_cosign() {
 run_step "Install cosign v${cosign_version}" install_cosign
 
 # ==============================================================================
-# Step 6: Completion marker
+# Step 6: copa (Copacetic — in-place OS-package patching)
+# ==============================================================================
+# copa ships a tarball per release/arch: copa_<ver>_linux_arm64.tar.gz.
+# It patches an existing image BY REFERENCE using a trivy report + BuildKit.
+install_copa() {
+  local ver="${copa_version}"
+  local tarball="copa_$${ver}_linux_arm64.tar.gz"
+  curl -fsSL "https://github.com/project-copacetic/copacetic/releases/download/v$${ver}/$${tarball}" -o /tmp/copa.tar.gz
+  tar -xzf /tmp/copa.tar.gz -C /tmp copa
+  install -m 0755 /tmp/copa /usr/local/bin/copa
+  rm -f /tmp/copa.tar.gz /tmp/copa
+  copa --version
+}
+run_step "Install copa v${copa_version}" install_copa
+
+# ==============================================================================
+# Step 7: Pre-pull BuildKit image (copa needs a buildkitd endpoint)
+# ==============================================================================
+# copa drives BuildKit to apply the patch layer. The hardening strategy starts
+# a moby/buildkit container at run time (ensure_buildkit); pre-pulling the image
+# here makes the first patch run fast and avoids a mid-run pull failure.
+prepull_buildkit() {
+  docker pull ${buildkit_image}
+}
+run_step "Pre-pull BuildKit image ${buildkit_image}" prepull_buildkit
+
+# ==============================================================================
+# Step 8: Completion marker
 # ==============================================================================
 write_marker() {
   cat > /opt/IMAGE_FORGE_READY <<EOF
@@ -132,6 +159,8 @@ docker=$(docker --version 2>/dev/null || echo missing)
 trivy=$(trivy --version 2>/dev/null | head -1 || echo missing)
 syft=$(syft version 2>/dev/null | head -1 || echo missing)
 cosign=$(cosign version 2>/dev/null | head -1 || echo missing)
+copa=$(copa --version 2>/dev/null | head -1 || echo missing)
+buildkit_image=${buildkit_image}
 EOF
   chmod 0644 /opt/IMAGE_FORGE_READY
 }

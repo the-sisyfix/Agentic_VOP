@@ -79,16 +79,16 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 #
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
-    "checkov-ec2": 10,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
-    "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
-    "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
-    "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
-    "trivy-image-php-ec2": 20,  # PHP image CVEs incl. PHP2Shell (per-finding — no batching)
-    "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
-    "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
-    "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)
-    "semgrep-ec2": 20,  # SAST findings (CodeEditStrategy)
-    "serverless-ec2": 20,  # Semgrep on Lambda source — full-pool run (pool ≈ 21) to stress .py + .tf mix
+    "checkov-ec2": 20,
+    "trivy-image-ec2": 20,
+    "trivy-image-java-ec2": 20,
+    "trivy-image-python-ec2": 20,
+    "trivy-image-php-ec2": 20,
+    "trivy-os-ec2": 20,
+    "trivy-os-al2-ec2": 4,
+    "trivy-fs-ec2": 20,
+    "semgrep-ec2": 20,
+    "serverless-ec2": 20,
 }
 
 # Hard cap on final sample size — trims picks after pinned + scoops + fallback.
@@ -349,14 +349,25 @@ def sample_and_copy_ec2_issues(
 
     # ---- 4. Copy picks into demo.issues under this run_id ----
     # Strip the primary key + timestamps so the demo sequence assigns fresh
-    # values. Everything else preserves the real issue's shape.
+    # values. public_issue_id back-references the real row so the UI /
+    # backend can resolve the asset against the public tables without
+    # relying on id collisions (migration 0045 gave demo.issues its own seq).
     to_insert: list[dict] = []
     for iss in picks:
         row = {k: v for k, v in iss.items() if k not in ("id", "created_at", "updated_at")}
         row["agent_run_id"] = run_id
+        row["public_issue_id"] = iss.get("id")
         to_insert.append(row)
 
-    inserted = sb_demo.table("issues").insert(to_insert).execute()
+    try:
+        inserted = sb_demo.table("issues").insert(to_insert).execute()
+    except Exception as e:  # noqa: BLE001
+        # Pre-migration-0045 schemas don't have public_issue_id — degrade gracefully.
+        if "public_issue_id" not in str(e):
+            raise
+        for row in to_insert:
+            row.pop("public_issue_id", None)
+        inserted = sb_demo.table("issues").insert(to_insert).execute()
     inserted_count = len(inserted.data or [])
 
     emit_trace_demo(

@@ -26,6 +26,50 @@ class RunCreated(BaseModel):
     status: str
 
 
+# =============================================================================
+# Image Hardening (separate feature — not linked to the scanner pipeline)
+# =============================================================================
+class HardeningTriggerRequest(BaseModel):
+    """Payload to start an image-hardening run.
+
+    MVP: the auto_sign toggle is a request field (UI checkbox). A persisted
+    server-side default may be added later.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Image to harden (informational for the MVP sample; the build box builds
+    # the curated Dockerfile).
+    source_image_ref: str = Field(..., min_length=1, max_length=512)
+    # ECR repository URL to publish to (no tag).
+    target_registry: str = Field(..., min_length=1, max_length=512)
+    # Tag to publish under (e.g. v0.1.0). Must be a valid Docker tag: starts
+    # with an alphanumeric or underscore, then alphanumerics / . _ - only
+    # (NO colons or slashes — those break the repo:tag reference). Fail fast
+    # here with a clear 422 instead of a cryptic `docker tag` error mid-run.
+    published_tag: str = Field(
+        ..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_][A-Za-z0-9._-]*$"
+    )
+    # When true, auto-dispatch the signing workflow after a successful publish.
+    auto_sign: bool = False
+    # Remediation mode: "patch" = copa in-place OS patch (default, primary);
+    # "rebuild" = build-from-Dockerfile (dependency/toolchain fixes; wired next).
+    mode: Literal["patch", "rebuild"] = "patch"
+    # Optional Dockerfile path on the build box — used by the rebuild leg
+    # (copa path triggers it when dependency CVEs remain + a Dockerfile exists).
+    dockerfile_path: str | None = Field(default=None, max_length=1024)
+    # Optional build-context directory on the build box (where the Dockerfile +
+    # requirements.txt live). The rebuild leg reads/writes requirements.txt here
+    # and runs `docker build <build_directory>`. Falls back to the configured
+    # default when omitted.
+    build_directory: str | None = Field(default=None, max_length=1024)
+
+
+class HardeningRunCreated(BaseModel):
+    hardening_run_id: int
+    status: str
+
+
 class LLMNormalizedIssue(BaseModel):
     """The fields Sub-Agent 1 (LLM) is responsible for producing.
 

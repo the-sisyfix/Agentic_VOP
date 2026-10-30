@@ -26,7 +26,7 @@ dependencies = [
     "langgraph-checkpoint>=4.1.1",
     # Pinned to remediate CVE-2026-48776 (unsanitized path interpolation in HTTP requests)
     # and CVE-2026-104873 (actions= arg misapplied on resource-scoped auth decorators); fixed in 0.4.4.
-    "langgraph-sdk>=0.4.4",
+    "langgraph-sdk>=0.4.6",
     # Pinned to remediate CVE-2026-97687/97688/97689 (HTTPS proxy TLS + streaming-API issues); fixed in 2.8.0.
     "urllib3>=2.8.0",
     # Pinned to remediate CVE-2026-53540/53539/53538 (Content-Length, QuerystringParser issues).
@@ -47,13 +47,18 @@ dependencies = [
     "boto3>=1.34.0",
     # Pinned to remediate CVE-2026-102265..102274 (JWT verification bypass + SSRF); fixed in 2.14.0.
     "pyjwt>=2.14.0",
-    # Pinned to remediate GHSA-6v7p-g79w-8964 (msgpack deserialization vulnerability).
-    "msgpack>=1.2.1",
+    # Pinned to remediate GHSA-6v7p-g79w-8964 + CVE-2026-114613 (msgpack
+    # deserialization + decoded-value leak on strict_map_key rejection).
+    "msgpack>=1.2.3",
     # Pinned to remediate PYSEC-2026-3455/3456/3457 (pyasn1 quadratic OID parsing + unbounded tag + Real exponentiation).
     "pyasn1>=0.6.4",
     # Transitive via langgraph/fsspec consumers. Pinned to remediate CVE-2026-104851
     # (ReferenceFileSystem Kerchunk JSON parsing issue); fixed in 2026.6.0.
     "fsspec>=2026.6.0",
+    # Transitive via requests/boto3/httpx/supabase. Pinned to remediate
+    # PYSEC-2026-4320 (compromised emSign/eMudhra root CA in the bundled CA
+    # store); fixed in 2026.10.18.
+    "certifi>=2026.10.18",
     # Transitive via aiohttp/langchain stack. Pinned to remediate CVE-2026-104874
     # (reference leak in items-view union/subtraction, C extension); fixed in 6.9.1.
     "multidict>=6.9.1",

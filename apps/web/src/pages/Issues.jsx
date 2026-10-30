@@ -26,7 +26,7 @@ const ISSUE_COLUMNS = [
   { key: 'issue_id', label: 'Issue ID' },
   { key: 'asset_id', label: 'Asset' },
   { key: 'asset_type', label: 'Type' },
-  { key: 'cve_id', label: 'CVE' },
+  { key: 'cve_id', label: 'CVE / ID' },
   { key: 'severity', label: 'Severity' },
   { key: 'derived_risk', label: 'Derived Risk' },
   { key: 'description', label: 'Description' },
@@ -173,7 +173,7 @@ export default function Issues() {
                     {isVisible('issue_id') && <th>ISSUE ID</th>}
                     {isVisible('asset_id') && <th>ASSET</th>}
                     {isVisible('asset_type') && <th>TYPE</th>}
-                    {isVisible('cve_id') && <th>CVE</th>}
+                    {isVisible('cve_id') && <th>CVE / ID</th>}
                     {isVisible('severity') && <th>SEVERITY</th>}
                     {isVisible('derived_risk') && (
                       <th>

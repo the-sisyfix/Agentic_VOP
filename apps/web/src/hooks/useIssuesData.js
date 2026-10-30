@@ -24,7 +24,7 @@ export function useIssuesData() {
       const { data, error } = await supabase
         .from('issue_with_asset')
         .select(
-          'id, source, cve_id, severity, derived_risk, title, description, ' +
+          'id, source, cve_id, source_vuln_id, severity, derived_risk, title, description, ' +
             'first_detected, cvss_attack_vector, remediation_suggestion, ' +
             'asset_identity, created_at, ' +
             'asset_id, asset_name, asset_type'
@@ -53,7 +53,10 @@ export function useIssuesData() {
           row?.asset_identity?.hostname ||
           '',
         asset_type: row.asset_type || '',
-        cve_id: row.cve_id || '',
+        // CVE for CVE-emitting scanners (trivy, grype); fall back to the
+        // scanner's native vuln id for CSPM/SAST (CKV_AWS_24, rule.name, etc.)
+        // so the column is never blank. UI column labeled "CVE / ID".
+        cve_id: row.cve_id || row.source_vuln_id || '',
         severity: row.severity || '',
         derived_risk: row.derived_risk,
         // Prefer description; fall back to title (Checkov issues often have
