@@ -16,4 +16,4 @@
 # DO NOT use this image for anything real — it exists only to prove the leg.
 # =============================================================================
 
-urllib3==1.26.5
+urllib3==2.8.0
