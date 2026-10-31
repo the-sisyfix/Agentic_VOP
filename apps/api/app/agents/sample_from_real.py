@@ -255,6 +255,16 @@ def sample_and_copy_ec2_issues(
     def _dedup_key(iss: dict) -> tuple[str, str, str]:
         return (iss.get("source_vuln_id") or "", _resource_label(iss), _line_hint(iss))
 
+    # Count how many raw candidate issues map to each dedup key BEFORE
+    # we start skipping duplicates. Used downstream so demo.issues can
+    # record "this surviving row stands for N raw findings" and the
+    # master's counter can credit fixed/rolled_back by that count — the
+    # end-of-run summary then sums to the raw scanner count, not the
+    # post-dedup count. Migration 0046 adds the column.
+    from collections import Counter  # noqa: PLC0415 — local import keeps module-top clean
+
+    _dedup_counts: dict[tuple[str, str, str], int] = Counter(_dedup_key(iss) for iss in ec2_issues)
+
     already_picked_keys = {_dedup_key(p) for p in picks}
     by_source: dict[str, list[dict]] = {}
     for iss in ec2_issues:
@@ -357,17 +367,26 @@ def sample_and_copy_ec2_issues(
         row = {k: v for k, v in iss.items() if k not in ("id", "created_at", "updated_at")}
         row["agent_run_id"] = run_id
         row["public_issue_id"] = iss.get("id")
+        # How many raw scanner findings this surviving pick represents
+        # (default 1 for non-deduped rows). Migration 0046 adds the column.
+        row["raw_duplicate_count"] = int(_dedup_counts.get(_dedup_key(iss), 1))
         to_insert.append(row)
+
+    def _retry_without(cols: list[str]) -> list[dict]:
+        for row in to_insert:
+            for c in cols:
+                row.pop(c, None)
+        return to_insert
 
     try:
         inserted = sb_demo.table("issues").insert(to_insert).execute()
     except Exception as e:  # noqa: BLE001
-        # Pre-migration-0045 schemas don't have public_issue_id — degrade gracefully.
-        if "public_issue_id" not in str(e):
+        # Degrade gracefully for schemas that pre-date either migration.
+        err = str(e)
+        missing = [c for c in ("public_issue_id", "raw_duplicate_count") if c in err]
+        if not missing:
             raise
-        for row in to_insert:
-            row.pop("public_issue_id", None)
-        inserted = sb_demo.table("issues").insert(to_insert).execute()
+        inserted = sb_demo.table("issues").insert(_retry_without(missing)).execute()
     inserted_count = len(inserted.data or [])
 
     emit_trace_demo(

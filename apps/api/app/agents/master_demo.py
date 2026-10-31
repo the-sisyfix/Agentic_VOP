@@ -432,13 +432,43 @@ def _fix_node(state: DemoMasterState) -> dict:
     _all_covered_flat = list({i for ids in pkg_covered_ids.values() for i in ids})
     check_id_by_issue = _lookup_check_ids(sb, _all_covered_flat)
 
+    # Per-issue raw-duplicate count (migration 0046). Each surviving demo.issue
+    # may represent N raw scanner findings that the sampler collapsed. Multiply
+    # fixed/rolled_back/no-fix-needed credit by this count so the end-of-run
+    # summary sums to the raw scanner finding count, not the post-dedup count.
+    dup_count_by_issue: dict[int, int] = {}
+    if _all_covered_flat:
+        try:
+            _dup_rows = (
+                sb.table("issues")
+                .select("id,raw_duplicate_count")
+                .in_("id", _all_covered_flat)
+                .execute()
+                .data
+                or []
+            )
+            dup_count_by_issue = {
+                int(r["id"]): max(1, int(r.get("raw_duplicate_count") or 1)) for r in _dup_rows
+            }
+        except Exception:  # noqa: BLE001 — pre-0046 schemas have no column; fall back to 1 per issue
+            dup_count_by_issue = {}
+
+    def _dup(iss_id: int) -> int:
+        return dup_count_by_issue.get(int(iss_id), 1)
+
+    def _dup_sum(iss_ids: list[int]) -> int:
+        return sum(_dup(i) for i in iss_ids)
+
     for pkg in pkg_rows:
         if is_cancellation_requested_demo(run_id):
             raise RunCancelledError("Demo run cancelled during fix stage")
 
         # Use the pre-scanned covered_ids for this package
         covered_ids_list = pkg_covered_ids.get(int(pkg["id"]), [])
-        pkg_findings = len(covered_ids_list) or 1
+        # pkg_findings credits each covered issue by its raw-duplicate count
+        # (default 1 per issue) so counters sum to raw-finding totals, not
+        # post-dedup totals.
+        pkg_findings = _dup_sum(covered_ids_list) or 1
 
         # Flip package status to `ready_for_execution` BEFORE calling SA-4
         # so the Remediation page reflects "this one is being worked on now"
@@ -590,8 +620,8 @@ def _fix_node(state: DemoMasterState) -> dict:
 
         if status == "success":
             succeeded += 1
-            findings_fixed += len(fixed_ids_here)
-            findings_unaddressed += len(unaddressed_ids_here)
+            findings_fixed += _dup_sum(fixed_ids_here)
+            findings_unaddressed += _dup_sum(unaddressed_ids_here)
             # Only queue unaddressed findings for retry when this was a
             # real batch. See gating rationale on the rolled_back branch
             # below. Singleton unaddressed → nothing structural to gain
@@ -600,8 +630,8 @@ def _fix_node(state: DemoMasterState) -> dict:
                 all_unaddressed_ids.extend(unaddressed_ids_here)
         elif status == "partial_success":
             partial += 1
-            findings_fixed += len(fixed_ids_here)
-            findings_unaddressed += len(unaddressed_ids_here)
+            findings_fixed += _dup_sum(fixed_ids_here)
+            findings_unaddressed += _dup_sum(unaddressed_ids_here)
             if len(covered_ids_list) > 1:
                 all_unaddressed_ids.extend(unaddressed_ids_here)
         elif status == "no_fix_needed":
