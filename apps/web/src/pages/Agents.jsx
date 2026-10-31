@@ -474,7 +474,15 @@ export default function Agents() {
   }, [agents])
 
   const filteredEvents = useMemo(() => {
+    // Hide "LLM call — prompt: ... tokens" lines for sub-agents 1/2/3 —
+    // they flood the trace with no actionable signal. SA-4 keeps them
+    // because its command execution lines are the useful signal.
+    const _NOISY_LLM_AGENTS = new Set(['sub-agent-1', 'sub-agent-2', 'sub-agent-3'])
+    const _NOISY_LLM_PATTERN = /^LLM call\s*—\s*prompt:/i
     return traceEvents.filter(ev => {
+      if (_NOISY_LLM_AGENTS.has(ev.from) && _NOISY_LLM_PATTERN.test(ev.message || '')) {
+        return false
+      }
       const matchesAgent =
         selectedAgent === 'all' ||
         ev.from === selectedAgent ||

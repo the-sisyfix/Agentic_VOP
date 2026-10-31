@@ -50,8 +50,9 @@ dependencies = [
     # Pinned to remediate GHSA-6v7p-g79w-8964 + CVE-2026-114613 (msgpack
     # deserialization + decoded-value leak on strict_map_key rejection).
     "msgpack>=1.2.3",
-    # Pinned to remediate PYSEC-2026-3455/3456/3457 (pyasn1 quadratic OID parsing + unbounded tag + Real exponentiation).
-    "pyasn1>=0.6.4",
+    # Pinned to remediate PYSEC-2026-3455/3456/3457 + CVE-2026-119194/5/6/7
+    # (quadratic CPU on constructed BIT STRING / OCTET STRING / tag parsing / Real exponentiation).
+    "pyasn1>=0.6.5",
     # Transitive via langgraph/fsspec consumers. Pinned to remediate CVE-2026-104851
     # (ReferenceFileSystem Kerchunk JSON parsing issue); fixed in 2026.6.0.
     "fsspec>=2026.6.0",

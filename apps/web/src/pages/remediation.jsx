@@ -82,6 +82,10 @@ export default function Remediation() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
   const [detail, setDetail] = useState(null)
+  // Pagination
+  const PAGE_SIZE = 50
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPackages, setTotalPackages] = useState(0)
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
@@ -124,22 +128,33 @@ export default function Remediation() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      const url = statusFilter === 'all'
-        ? apiBase
-        : `${apiBase}?status=${statusFilter}`
-      const res = await fetch(url)
+      const offset = (currentPage - 1) * PAGE_SIZE
+      const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+      if (statusFilter !== 'all') qs.set('status', statusFilter)
+      const res = await fetch(`${apiBase}?${qs}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      setPackages(data.packages || [])
+      const pkgs = data.packages || []
+      setPackages(pkgs)
+      // Only show the top 50 — don't surface the full DB total (e.g. "of 3184")
+      // in the footer. Keeps the UI focused on the most-recent packages.
+      setTotalPackages(pkgs.length)
     } catch (e) {
       setError(e.message || 'Failed to load packages')
       if (!silent) setPackages([])
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [statusFilter, apiBase])
+  }, [statusFilter, apiBase, currentPage])
 
   useEffect(() => { refreshList() }, [refreshList])
+
+  // When the status filter changes, go back to page 1 so we don't request
+  // an offset that is now out of range (e.g. filtering down to 10 rows
+  // while sitting on page 3).
+  useEffect(() => { setCurrentPage(1) }, [statusFilter, apiBase])
+
+  const totalPages = Math.max(1, Math.ceil(totalPackages / PAGE_SIZE))
 
   // Clear selection when switching modes so demo/real packages don't bleed.
   useEffect(() => {
@@ -426,6 +441,7 @@ export default function Remediation() {
 
           {/* List */}
           <div className="rmp-list-card">
+            <div className="rmp-list-scroll">
             {loading ? (
               <div className="rmp-empty">Loading packages…</div>
             ) : error ? (
@@ -484,6 +500,70 @@ export default function Remediation() {
                   })}
                 </tbody>
               </table>
+            )}
+            </div>
+
+            {/* Pagination — matches the Issues page footer so the
+                numbered buttons + chevrons + first/last/dots all look
+                the same across the app. Pinned at the bottom of the list
+                card so it stays visible while the table body scrolls. */}
+            {!loading && !error && (
+              <div className="issues-footer">
+                <span className="issues-count">
+                  Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, totalPackages)} of {totalPackages} packages
+                </span>
+                {totalPages > 1 && (
+                  <div className="issues-pagination">
+                    <button
+                      className="pagination-btn"
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                      </svg>
+                    </button>
+
+                    {currentPage > 3 && (
+                      <>
+                        <button className="pagination-btn" onClick={() => setCurrentPage(1)}>1</button>
+                        {currentPage > 4 && <span className="pagination-dots">...</span>}
+                      </>
+                    )}
+
+                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                      const page = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i
+                      if (page > totalPages || page < 1) return null
+                      return (
+                        <button
+                          key={page}
+                          className={`pagination-btn ${currentPage === page ? 'active' : ''}`}
+                          onClick={() => setCurrentPage(page)}
+                        >
+                          {page}
+                        </button>
+                      )
+                    })}
+
+                    {currentPage < totalPages - 2 && (
+                      <>
+                        {currentPage < totalPages - 3 && <span className="pagination-dots">...</span>}
+                        <button className="pagination-btn" onClick={() => setCurrentPage(totalPages)}>{totalPages}</button>
+                      </>
+                    )}
+
+                    <button
+                      className="pagination-btn"
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                      </svg>
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </main>
@@ -630,7 +710,18 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
 
   // Effective status: if locally approved, treat as ready_for_execution
   const effectiveStatus = localApproved ? 'ready_for_execution' : pkg?.status
-  const effectiveTerminal = effectiveStatus === 'ready_for_execution' || effectiveStatus === 'rejected'
+  const effectiveTerminal =
+    effectiveStatus === 'ready_for_execution' ||
+    effectiveStatus === 'rejected' ||
+    // Terminal auto-demo + HITL-approved outcomes — SA-4 already ran, there
+    // is no decision left to make. Hides the pointless Approve/Reject
+    // buttons on packages that are already Fixed / Rolled Back / etc.
+    effectiveStatus === 'fixed' ||
+    effectiveStatus === 'rolled_back' ||
+    effectiveStatus === 'fix_failed' ||
+    effectiveStatus === 'review_rejected' ||
+    effectiveStatus === 'approved' ||
+    effectiveStatus === 'no_fix_needed'
 
   // Build upgrade steps from pathway remediation_steps
   const allSteps = pw?.remediation_steps?.map((s, i) => ({
@@ -765,7 +856,57 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                 {FAMILY_LABEL[pkg.family] || pkg.family}
               </span>
             </div>
-            <StatusPill status={pkg.status} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {pw?.confidence_score && (() => {
+                const tone = confidenceTone(pw.confidence_score)
+                // Sky-blue filled pill — distinct from every other color on
+                // screen: cyan #id pill, orange severity, violet UPGRADE
+                // (CHANGE TYPE row), green Fixed. The number inside carries
+                // the tone so good/warn/bad reads at a glance.
+                // Score number keeps the tone (green/amber/red) so it
+                // reads at a glance; the pill itself gets a lighter solid
+                // fill (below) so the chip pops against the dark card.
+                const numColor = tone === 'good'
+                  ? '#86efac'
+                  : tone === 'warn'
+                    ? '#fde68a'
+                    : '#fda4af'
+                return (
+                  <div
+                    className={`rmp-conf-cell ${tone}`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      background: 'rgba(226, 232, 240, 0.1)',
+                      border: '1px solid rgba(226, 232, 240, 0.25)',
+                      padding: '4px 10px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      textTransform: 'uppercase',
+                      letterSpacing: 0.5,
+                      color: '#f1f5f9',
+                    }}
+                  >
+                    Confidence
+                    <span
+                      className="rmp-conf-num"
+                      style={{
+                        color: numColor,
+                        fontSize: 13,
+                        fontWeight: 700,
+                        letterSpacing: 0,
+                        textTransform: 'none',
+                      }}
+                    >
+                      {pw.confidence_score}%
+                    </span>
+                  </div>
+                )
+              })()}
+              <StatusPill status={pkg.status} />
+            </div>
           </div>
 
           <div className="detail-meta-grid">
@@ -1105,15 +1246,9 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
             </div>
           </div>
 
-          {/* Confidence score */}
-          {pw?.confidence_score && (
-            <div style={{ padding: '12px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
-              <div className={`rmp-conf-cell ${confidenceTone(pw.confidence_score)}`}>
-                <span style={{ fontSize: 11, color: '#64748B', marginRight: 8 }}>Confidence</span>
-                <span className="rmp-conf-num">{pw.confidence_score}%</span>
-              </div>
-            </div>
-          )}
+          {/* Confidence score — now lives in the drawer header row (next to
+              StatusPill), so the standalone bottom block is no longer needed.
+              Kept the ref here as a sentinel in case we want to bring it back. */}
 
           {/* HITL v2 — Post-fix review panel. Only shown when the package
               is awaiting_review. Two flavors:
@@ -1279,8 +1414,42 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                       {ticketLoading ? 'Creating…' : 'Create Ticket'}
                     </button>
                   )
-                ) : (
+                ) : effectiveStatus === 'rejected' ? (
                   <span style={{ flex: 1, textAlign: 'center', color: '#e2876f', fontWeight: 600 }}>✗ Rejected</span>
+                ) : (
+                  // All other terminal states (fixed / rolled_back / fix_failed /
+                  // review_rejected / approved / no_fix_needed): show a status
+                  // chip in place of the buttons — nothing to decide.
+                  // Confidence lives in the drawer header row (not here).
+                  <span
+                    style={{
+                      flex: 1,
+                      textAlign: 'center',
+                      color:
+                        effectiveStatus === 'fixed'
+                          ? '#7dc078'
+                          : effectiveStatus === 'rolled_back' || effectiveStatus === 'review_rejected'
+                            ? '#e2876f'
+                            : effectiveStatus === 'fix_failed'
+                              ? '#d17878'
+                              : '#94a3b8',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {effectiveStatus === 'fixed'
+                      ? '✓ Fixed'
+                      : effectiveStatus === 'rolled_back'
+                        ? '↶ Rolled Back'
+                        : effectiveStatus === 'fix_failed'
+                          ? '✗ Fix Failed'
+                          : effectiveStatus === 'review_rejected'
+                            ? '✗ Review Rejected'
+                            : effectiveStatus === 'no_fix_needed'
+                              ? '— No Fix Needed'
+                              : effectiveStatus === 'approved'
+                                ? '✓ Approved'
+                                : effectiveStatus}
+                  </span>
                 )}
               </>
             ) : (

@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -684,69 +683,16 @@ class Env2StatusResponse(BaseModel):
     schema: str | None = None  # 'public' or 'demo' — which side is holding
 
 
-# Zombie fix_runs older than this are auto-rolled-back on the next status
-# check. Longest legitimate SA-4 execution is ~5 min (docker build + trivy
-# rescan on the biggest image), so 20 min is well past "really stuck".
-_STALE_FIX_RUN_AGE_MIN = 20
-
 # Agent-run statuses that count as "pipeline is in flight" — guards against
 # the gap where SA-1 / SA-2 / SA-3 are running but no fix_runs exist yet.
 _ACTIVE_AGENT_RUN_STATUSES = ("queued", "running")
 
-
-def _sweep_stale_fix_runs(sb: Any, schema_name: str) -> int:
-    """Auto-rollback any fix_run whose updated_at is older than the staleness
-    threshold. Clears zombie locks left over from a crashed uvicorn so the
-    next user isn't blocked forever. Returns the number of rows swept.
-    """
-    from datetime import datetime, timedelta  # noqa: PLC0415
-
-    cutoff = (datetime.now(UTC) - timedelta(minutes=_STALE_FIX_RUN_AGE_MIN)).isoformat()
-    swept = 0
-    try:
-        resp = (
-            sb.table("fix_runs")
-            .update(
-                {
-                    "status": "rolled_back",
-                    "error_message": (
-                        f"auto-swept: fix_run was in-flight but updated_at was "
-                        f"older than {_STALE_FIX_RUN_AGE_MIN}m (orchestrator "
-                        f"likely crashed). Unblocking the env2 lock."
-                    ),
-                }
-            )
-            .in_("status", ("pending", "provisioning", "executing", "validating"))
-            .lt("updated_at", cutoff)
-            .execute()
-        )
-        swept += len(resp.data or [])
-    except Exception:  # noqa: BLE001,S110 — best-effort sweep; a DB blip here must not break status checks
-        pass
-
-    # Also sweep zombie agent_runs stuck in queued/running — covers the case
-    # where the pipeline died in SA-1/SA-2/SA-3 before any fix_run existed.
-    try:
-        resp = (
-            sb.table("agent_runs")
-            .update(
-                {
-                    "status": "cancelled",
-                    "summary": (
-                        f"auto-swept: agent_run stuck in queued/running past "
-                        f"{_STALE_FIX_RUN_AGE_MIN}m (orchestrator likely crashed)."
-                    ),
-                }
-            )
-            .in_("status", list(_ACTIVE_AGENT_RUN_STATUSES))
-            .lt("started_at", cutoff)
-            .execute()
-        )
-        swept += len(resp.data or [])
-    except Exception:  # noqa: BLE001,S110 — best-effort sweep; a DB blip here must not break status checks
-        pass
-
-    return swept
+# NOTE: the auto-staleness sweeper (previously killed any run older than
+# 20 min on each status check) was removed on 2026-10-30 — it was killing
+# legitimate long runs (e.g. 10-issue SA-4 chains that take 30-50 min).
+# Zombie runs from a crashed uvicorn are now cleared manually via the
+# "Force Release env2" button (/admin/env2/force-release), which marks all
+# in-flight fix_runs failed + running agent_runs cancelled on demand.
 
 
 def _get_env2_status() -> Env2StatusResponse:
@@ -758,7 +704,6 @@ def _get_env2_status() -> Env2StatusResponse:
 
     for schema_name, client_fn in (("public", supabase_admin), ("demo", supabase_admin_demo)):
         sb = client_fn()
-        _sweep_stale_fix_runs(sb, schema_name)
 
         try:
             row = any_concurrent_run(sb)
@@ -1739,6 +1684,7 @@ def list_demo_remediation_packages(
     status: str | None = None,
     issue_id: int | None = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     """List demo remediation packages — same shape as /admin/remediation-packages
     plus `pathways` so the list view can render confidence + validation columns
@@ -1748,8 +1694,21 @@ def list_demo_remediation_packages(
     asset_identity → demo.assets match. Keeps the UI free of cross-schema id
     lookups (which previously returned wrong assets when demo and public
     issue ids collided — see migration 0045).
+
+    Pagination: pass ?limit=50&offset=50 for the second page, etc. The
+    response includes a `total` count so the UI can render Page X of Y.
     """
     sb = supabase_admin_demo()
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+    # count-only query first — cheap, uses PostgREST's exact count header
+    count_q = sb.table("remediation_packages").select("id", count="exact")
+    if status:
+        count_q = count_q.eq("status", status)
+    if issue_id is not None:
+        count_q = count_q.eq("issue_id", issue_id)
+    total = count_q.limit(1).execute().count or 0
+
     q = (
         sb.table("remediation_packages")
         .select(
@@ -1758,7 +1717,7 @@ def list_demo_remediation_packages(
             "rejected_reason,created_at,updated_at,pathways"
         )
         .order("created_at", desc=True)
-        .limit(max(1, min(200, limit)))
+        .range(offset, offset + limit - 1)
     )
     if status:
         q = q.eq("status", status)
@@ -1788,7 +1747,12 @@ def list_demo_remediation_packages(
             pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, asset_rows)
             pkg["public_issue_id"] = iss.get("public_issue_id")
 
-    return {"packages": packages}
+    return {
+        "packages": packages,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/admin/remediation-packages/demo/{pkg_id}")
