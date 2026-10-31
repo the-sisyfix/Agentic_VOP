@@ -134,8 +134,11 @@ export default function Remediation() {
       const res = await fetch(`${apiBase}?${qs}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      setPackages(data.packages || [])
-      setTotalPackages(data.total ?? (data.packages?.length || 0))
+      const pkgs = data.packages || []
+      setPackages(pkgs)
+      // Only show the top 50 — don't surface the full DB total (e.g. "of 3184")
+      // in the footer. Keeps the UI focused on the most-recent packages.
+      setTotalPackages(pkgs.length)
     } catch (e) {
       setError(e.message || 'Failed to load packages')
       if (!silent) setPackages([])
@@ -500,63 +503,66 @@ export default function Remediation() {
             )}
             </div>
 
-            {/* Pagination controls — only shown when there is more than one
-                page (otherwise clutter). Pinned at the bottom of the list
+            {/* Pagination — matches the Issues page footer so the
+                numbered buttons + chevrons + first/last/dots all look
+                the same across the app. Pinned at the bottom of the list
                 card so it stays visible while the table body scrolls. */}
-            {!loading && !error && totalPages > 1 && (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '12px 16px',
-                  borderTop: '1px solid #2D3748',
-                  fontSize: 12,
-                  color: '#94a3b8',
-                }}
-              >
-                <span>
-                  Showing <strong style={{ color: '#f1f5f9' }}>{(currentPage - 1) * PAGE_SIZE + 1}</strong>
-                  –<strong style={{ color: '#f1f5f9' }}>{Math.min(currentPage * PAGE_SIZE, totalPackages)}</strong>
-                  {' '}of <strong style={{ color: '#f1f5f9' }}>{totalPackages}</strong>
+            {!loading && !error && (
+              <div className="issues-footer">
+                <span className="issues-count">
+                  Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, totalPackages)} of {totalPackages} packages
                 </span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <button
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    style={{
-                      padding: '4px 12px',
-                      borderRadius: 4,
-                      background: currentPage === 1 ? 'rgba(100, 116, 139, 0.1)' : 'rgba(100, 116, 139, 0.2)',
-                      border: '1px solid rgba(148, 163, 184, 0.2)',
-                      color: currentPage === 1 ? '#64748b' : '#cbd5e1',
-                      cursor: currentPage === 1 ? 'not-allowed' : 'pointer',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    ← Prev
-                  </button>
-                  <span style={{ padding: '0 8px' }}>
-                    Page <strong style={{ color: '#f1f5f9' }}>{currentPage}</strong> of {totalPages}
-                  </span>
-                  <button
-                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                    disabled={currentPage >= totalPages}
-                    style={{
-                      padding: '4px 12px',
-                      borderRadius: 4,
-                      background: currentPage >= totalPages ? 'rgba(100, 116, 139, 0.1)' : 'rgba(100, 116, 139, 0.2)',
-                      border: '1px solid rgba(148, 163, 184, 0.2)',
-                      color: currentPage >= totalPages ? '#64748b' : '#cbd5e1',
-                      cursor: currentPage >= totalPages ? 'not-allowed' : 'pointer',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    Next →
-                  </button>
-                </div>
+                {totalPages > 1 && (
+                  <div className="issues-pagination">
+                    <button
+                      className="pagination-btn"
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                      </svg>
+                    </button>
+
+                    {currentPage > 3 && (
+                      <>
+                        <button className="pagination-btn" onClick={() => setCurrentPage(1)}>1</button>
+                        {currentPage > 4 && <span className="pagination-dots">...</span>}
+                      </>
+                    )}
+
+                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                      const page = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i
+                      if (page > totalPages || page < 1) return null
+                      return (
+                        <button
+                          key={page}
+                          className={`pagination-btn ${currentPage === page ? 'active' : ''}`}
+                          onClick={() => setCurrentPage(page)}
+                        >
+                          {page}
+                        </button>
+                      )
+                    })}
+
+                    {currentPage < totalPages - 2 && (
+                      <>
+                        {currentPage < totalPages - 3 && <span className="pagination-dots">...</span>}
+                        <button className="pagination-btn" onClick={() => setCurrentPage(totalPages)}>{totalPages}</button>
+                      </>
+                    )}
+
+                    <button
+                      className="pagination-btn"
+                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      disabled={currentPage === totalPages}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                      </svg>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -857,6 +863,9 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                 // screen: cyan #id pill, orange severity, violet UPGRADE
                 // (CHANGE TYPE row), green Fixed. The number inside carries
                 // the tone so good/warn/bad reads at a glance.
+                // Score number keeps the tone (green/amber/red) so it
+                // reads at a glance; the pill itself gets a lighter solid
+                // fill (below) so the chip pops against the dark card.
                 const numColor = tone === 'good'
                   ? '#86efac'
                   : tone === 'warn'
@@ -869,8 +878,8 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: 10,
-                      background: 'rgba(13, 148, 136, 0.16)',
-                      border: '1px solid rgba(45, 212, 191, 0.3)',
+                      background: 'rgba(226, 232, 240, 0.1)',
+                      border: '1px solid rgba(226, 232, 240, 0.25)',
                       padding: '4px 10px',
                       borderRadius: 4,
                       fontSize: 11,
