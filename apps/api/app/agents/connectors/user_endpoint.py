@@ -179,6 +179,8 @@ def fetch(
                         or row.get("VulnerabilityID")
                         or row.get("vulnerability_id")
                         or row.get("cve_id")
+                        or row.get("rule_id")  # semgrep / serverless
+                        or row.get("check_id")  # checkov
                         or ""
                     )
                 if str(vid).strip().lower() in wanted:
