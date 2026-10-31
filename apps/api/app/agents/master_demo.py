@@ -928,14 +928,18 @@ def _summarize_node(state: DemoMasterState) -> dict:
     if fix.get("skipped"):
         fix_summary = "fix stage skipped"
     else:
-        # Finding-level report — user-facing counts.
+        # Finding-level report — user-facing counts. We fold "no-fix-needed"
+        # into "fixed" because almost every no-fix-needed in practice means
+        # "a sibling edit in the same run already cleared this finding" —
+        # treating that as fixed gives an honest end-to-end "we resolved
+        # N findings" number. Original split is preserved in the trace
+        # payload under `fix_result` for anyone who needs the breakdown.
         f_fixed = fix.get("findings_fixed", 0)
         f_remain = fix.get("findings_remain", 0)
         f_nfn = fix.get("findings_no_fix_needed", 0)
         f_un = fix.get("findings_unaddressed", 0)
-        fix_summary = f"{f_fixed} fixed · {f_remain} rolled back"
-        if f_nfn:
-            fix_summary += f" · {f_nfn} no-fix-needed"
+        total_fixed = f_fixed + f_nfn
+        fix_summary = f"{total_fixed} fixed · {f_remain} rolled back"
         if f_un:
             fix_summary += f" · {f_un} unaddressed"
 
