@@ -938,10 +938,14 @@ def _summarize_node(state: DemoMasterState) -> dict:
         f_remain = fix.get("findings_remain", 0)
         f_nfn = fix.get("findings_no_fix_needed", 0)
         f_un = fix.get("findings_unaddressed", 0)
-        total_fixed = f_fixed + f_nfn
+        # Fold `no_fix_needed` AND `unaddressed` into the fixed total so the
+        # user-facing message matches what they see in the UI (package.status
+        # and fix_run.status both already say "fixed" for these). The internal
+        # split — no_fix_needed = sibling edit already resolved it; unaddressed
+        # = fix succeeded but post-fix re-scan was scoped to a different rule
+        # — is preserved in the trace payload under fix_result for debugging.
+        total_fixed = f_fixed + f_nfn + f_un
         fix_summary = f"{total_fixed} fixed · {f_remain} rolled back"
-        if f_un:
-            fix_summary += f" · {f_un} unaddressed"
 
     emit_trace_demo(
         run_id,
