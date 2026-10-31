@@ -16,8 +16,13 @@
   flex: 1;
   padding: 24px 32px;
   background: #0B0F19;
-  overflow-y: auto;
+  /* Column layout so the header + stats + filter pills + pagination
+     stay anchored while only the list-card's table body scrolls. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   height: 100%;
+  overflow: hidden;
   transition: margin-right 0.3s ease;
 }
 

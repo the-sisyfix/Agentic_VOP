@@ -170,12 +170,31 @@
   filter: brightness(1.08);
 }
 
-/* List card */
+/* List card — fills remaining height; its scroll-wrap scrolls, header +
+   pagination inside stay pinned. */
 .rmp-list-card {
   background: #151C2C;
   border: 1px solid #1E293B;
   border-radius: 10px;
   overflow: hidden;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollable wrapper around the table — only this scrolls, so the thead
+   can be sticky and the pagination footer stays visible. */
+.rmp-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rmp-list-scroll .rmp-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #151C2C;
 }
 .rmp-empty {
   padding: 60px 24px;
