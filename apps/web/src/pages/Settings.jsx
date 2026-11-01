@@ -417,7 +417,7 @@ export default function Settings() {
         <main className="settings-main">
           <div className="settings-header">
             <h1>Settings</h1>
-            <p className="settings-subtitle">Configure your CyberRisk AI platform</p>
+            <p className="settings-subtitle">Configure your Sisyfix platform</p>
           </div>
 
           <div className="settings-content">
