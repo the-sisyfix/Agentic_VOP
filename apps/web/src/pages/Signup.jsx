@@ -45,7 +45,7 @@ export default function Signup() {
       <div className="auth-card">
         <div className="auth-header">
           <h1>Create Account</h1>
-          <p className="auth-subtitle">Sign up for CyberRisk AI</p>
+          <p className="auth-subtitle">Sign up for Sisyfix</p>
         </div>
 
         <form onSubmit={handleSubmit} className="auth-form">

@@ -6,7 +6,7 @@ import '../App.css'
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 export default function SystemSettings() {
-  const [siteName, setSiteName] = useState('CyberRisk AI')
+  const [siteName, setSiteName] = useState('Sisyfix')
   const [maintenanceMode, setMaintenanceMode] = useState(false)
   const [emailNotifications, setEmailNotifications] = useState(true)
   const [autoScan, setAutoScan] = useState(false)
@@ -65,7 +65,7 @@ export default function SystemSettings() {
                     className="settings-input"
                     value={siteName}
                     onChange={(e) => setSiteName(e.target.value)}
-                    placeholder="CyberRisk AI"
+                    placeholder="Sisyfix"
                   />
                 </div>
                 <div className="settings-item">

@@ -548,17 +548,7 @@ function SeverityBar({ critical = 0, high = 0, medium = 0 }) {
   )
 }
 
-// Map compliance tag → class hint so styling can colour each chip
-// independently. Tags we don't recognise fall back to a neutral chip.
-const TAG_CLASS_HINTS = {
-  'PCI-DSS': 'pci',
-  HIPAA: 'hipaa',
-  GDPR: 'gdpr',
-  SOC2: 'soc2',
-}
-
 function RegulatoryComplianceCard({ data }) {
-  const tags = data?.tags ?? []
   const findingCount = data?.findingCount ?? 0
   const critical = data?.critical ?? 0
   const high = data?.high ?? 0
@@ -577,27 +567,6 @@ function RegulatoryComplianceCard({ data }) {
         <div className="exposure-compact-content">
           <span className="exposure-compact-title">Regulatory Impact</span>
           <span className="exposure-compact-subtitle">Compliance scope at risk</span>
-          {/* Chips live inside the header content so they stay on the left
-              and never collide with the value strip on the right. */}
-          <div className="compliance-tags-container">
-            {tags.length === 0 ? (
-              <>
-                <span className="compliance-tag pci">PCI-DSS</span>
-                <span className="compliance-tag hipaa">HIPAA</span>
-                <span className="compliance-tag gdpr">GDPR</span>
-              </>
-            ) : (
-              tags.map((t) => (
-                <span
-                  key={t.tag}
-                  className={`compliance-tag ${TAG_CLASS_HINTS[t.tag] || ''}`}
-                  title={`${t.assets} ${t.assets === 1 ? 'asset' : 'assets'} · ${t.findings} findings`}
-                >
-                  {t.tag} {t.assets}
-                </span>
-              ))
-            )}
-          </div>
         </div>
       </div>
 
