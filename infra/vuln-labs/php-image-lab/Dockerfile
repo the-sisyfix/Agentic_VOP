@@ -10,8 +10,12 @@
 # WHY the snapshot repo + version pins: pinning php8.2 to 8.2.28 (a pre-patch
 # release, below the fixed 8.2.35) makes the image deterministically vulnerable
 # every rebuild, instead of depending on whatever the live mirror serves today.
-# The default sources are removed so a plain rebuild cannot silently pull the
-# patched 8.2.35 from bookworm-security.
+#
+# WHY also live bookworm-security: the snapshot repo is frozen at a date BEFORE
+# 8.2.35 was published, so apt couldn't resolve it when SA-4 tried to upgrade.
+# Adding the live security repo as a secondary source lets apt pull the real
+# patched version at fix time while the explicit version pin on the baseline
+# install keeps the "deterministically vulnerable" baseline intact.
 #
 # This mirrors a real stale enterprise PHP container: Debian base + apt PHP that
 # has drifted out of date. The fix (discovered by SA-3, not encoded here) is to
@@ -25,6 +29,7 @@ RUN set -eux; \
     rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
     echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian/20250601T000000Z/ bookworm main' > /etc/apt/sources.list; \
     echo 'deb [trusted=yes] http://snapshot.debian.org/archive/debian-security/20250601T000000Z/ bookworm-security main' >> /etc/apt/sources.list; \
+    echo 'deb http://deb.debian.org/debian-security bookworm-security main' >> /etc/apt/sources.list; \
     printf 'Acquire::Check-Valid-Until "false";\nAcquire::Retries "3";\n' > /etc/apt/apt.conf.d/99snapshot; \
     for i in 1 2 3 4 5; do apt-get update && break || { echo "apt-get update retry $i"; sleep 10; }; done; \
     for i in 1 2 3 4 5; do \
