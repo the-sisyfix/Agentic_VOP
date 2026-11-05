@@ -203,7 +203,61 @@ class Settings(BaseSettings):
     # (production behavior). Set to "dev" in your local .env to route all
     # reads/writes to the isolated dev schema — zero agent code changes needed.
     # The "demo" pipeline is unaffected (supabase_admin_demo() stays hardcoded).
+    #
+    # NOTE: db_schema is NOT the dev/prod data boundary. The real isolation
+    # boundary is the Supabase PROJECT (app_env + a dedicated dev project).
+    # See app_env below.
     db_schema: str = "public"
+
+    # --- Environment identity + PROD data-isolation guard ---
+    # app_env names the environment the app is running in:
+    #   "dev"  — local development (default). MUST point at the dev Supabase
+    #            project, never the PROD project.
+    #   "prod" — the deployed EC2 app. Set via SSM parameter
+    #            /sisyfix/prod/app/APP_ENV=prod, which the deploy workflow
+    #            writes into /opt/app/.env on every deploy.
+    #
+    # Default is "dev" so a fresh local checkout is protected by default: if a
+    # developer's .env still points at the PROD Supabase project, the guard
+    # below refuses to start and tells them to use the dev project.
+    #
+    # The guard is a no-op when app_env == "prod" — so PROD (which sets
+    # APP_ENV=prod in SSM) is completely unaffected and keeps using the PROD
+    # Supabase project exactly as before.
+    app_env: str = "dev"
+
+    # The PROD Supabase project ref the guard protects. When app_env != "prod"
+    # and AGENTIC_VOP_SUPABASE_URL contains this ref, startup hard-fails. Kept
+    # configurable (not hardcoded in logic) so it can be changed without a code
+    # edit if the PROD project ever moves.
+    prod_supabase_url_ref: str = "wkbymeovkopfufiaiwxm"
+
+    def _assert_not_pointing_at_prod_db(self) -> None:
+        """Refuse to start a non-prod app that is configured against the PROD
+        Supabase project.
+
+        Fail-safe by design: this only ever BLOCKS a misconfiguration (a dev/
+        local environment accidentally pointed at the PROD database). It never
+        alters a correctly configured environment. When app_env == "prod" it
+        does nothing, so the deployed EC2 app is unaffected.
+        """
+        if self.app_env.strip().lower() == "prod":
+            return
+        ref = (self.prod_supabase_url_ref or "").strip()
+        if not ref:
+            return
+        if ref in (self.agentic_vop_supabase_url or ""):
+            raise RuntimeError(
+                "Refusing to start: APP_ENV="
+                f"{self.app_env!r} (non-prod) but AGENTIC_VOP_SUPABASE_URL "
+                f"points at the PROD Supabase project ({ref!r}). Local/dev work "
+                "must use the dedicated dev Supabase project so it can never "
+                "read or write PROD data. Fix: set AGENTIC_VOP_SUPABASE_URL + "
+                "AGENTIC_VOP_SUPABASE_SERVICE_KEY to the dev project in your "
+                ".env. If this IS the production app, set APP_ENV=prod (in SSM: "
+                "/sisyfix/prod/app/APP_ENV=prod)."
+            )
 
 
 settings = Settings()
+settings._assert_not_pointing_at_prod_db()
