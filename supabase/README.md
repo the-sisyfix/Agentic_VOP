@@ -33,9 +33,11 @@ start** if `AGENTIC_VOP_SUPABASE_URL` points at the PROD project. See
 
 1. Create a new Supabase project (e.g. `agentic-vop-dev`).
 2. Apply **every** migration in `migrations/` in numeric order (see "Apply a
-   migration" below). This builds both the `public` and `demo` schemas so the
-   full pipeline — including Sub-Agent 3 (remediation) and Sub-Agent 4
-   (fixing), which use `demo` — works in dev.
+   migration" below). This builds the `public` schema. **The `demo` schema
+   (used by Sub-Agent 3/4) is NOT created by any migration in this repo**
+   (`db.py` refers to a "migration 0046" that does not exist here), so it has
+   to be reproduced from the PROD project and exposed in the Data API
+   ("Exposed schemas") before the remediation/fixing flow works in dev.
 3. Seed the config/reference tables so dev behaves like prod: `prompt_db`,
    `schema_mapping`, `connection_registry`, `remediation_patterns`, the MITRE
    catalogs (`mitre_cwe` / `mitre_capec` / `mitre_attack_techniques`), and

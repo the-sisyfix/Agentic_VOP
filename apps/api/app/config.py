@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # start (fails fast rather than silently attempt fixes with no target).
     fixer_env2_instance_id: str = ""
 
+    # Terraform `name_prefix` of the remediation playground that
+    # FIXER_ENV2_INSTANCE_ID points at (infra/vuln-labs/<env>/main.tf).
+    # Used by /admin/env2/reset-serverless to render the serverless-lab
+    # template with the right resource names. The CSPM reset does NOT need
+    # it (it reads the state key from backend.hcl on the box).
+    #   PROD (env2): vop-vuln-lab-env2   (default)
+    #   DEV  (env3): FIXER_LAB_NAME_PREFIX=vop-vuln-lab-env3
+    fixer_lab_name_prefix: str = "vop-vuln-lab-env2"
+
     # Path prefix to prepend to raw-finding absolute paths so they resolve to
     # env2's real filesystem layout. Example:
     #   Raw finding says:  /main.tf         (relative to Checkov's scan root)
