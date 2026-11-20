@@ -765,7 +765,8 @@
 }
 
 .top-fix-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 8px 260px 1fr 44px 92px;
   align-items: center;
   gap: 12px;
   padding: 8px 0;
@@ -785,11 +786,12 @@
 .fix-name {
   font-size: 12px;
   color: var(--dash-text-primary);
-  min-width: 100px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .fix-bar {
-  flex: 1;
   height: 5px;
   background: var(--dash-bg-shell);
   border-radius: 3px;
@@ -800,13 +802,13 @@
   height: 100%;
   background: var(--dash-low);
   border-radius: 3px;
+  min-width: 4px;
 }
 
 .fix-count {
   font-size: 11px;
   color: var(--dash-text-primary);
   font-weight: 600;
-  min-width: 36px;
   text-align: right;
 }
 
@@ -1531,3 +1533,30 @@
   background: rgba(139, 92, 246, 0.15);
   border-color: rgba(139, 92, 246, 0.3);
 }
+
+/* ─── Skeleton loader (first-visit shimmer) ─────────────────────────── */
+/* Shown on cold loads only — return visits hydrate from localStorage   */
+/* and skip the shimmer entirely.                                       */
+.skeleton-block {
+  display: inline-block;
+  background: linear-gradient(90deg,
+    rgba(100, 116, 139, 0.12) 0%,
+    rgba(148, 163, 184, 0.22) 50%,
+    rgba(100, 116, 139, 0.12) 100%);
+  background-size: 200% 100%;
+  border-radius: 6px;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  vertical-align: middle;
+}
+.skeleton-block-lg {
+  height: 2.2rem;
+  width: 110px;
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Fade in cards once data arrives so the swap doesn't pop */
+.stat-card .stat-card-value { transition: opacity 180ms ease; }
+.stat-card.is-loading .stat-card-value { opacity: 0.8; }

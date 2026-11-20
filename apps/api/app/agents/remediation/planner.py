@@ -658,13 +658,13 @@ def plan_remediation(
         # --- KB REPLAY SUCCESS — skip agentic + hybrid entirely ---
         from ..trace import emit_trace  # noqa: PLC0415
 
+        # KB entries only exist because a prior fix succeeded. Any KB replay
+        # is proven by definition — no counter check needed.
         enriched_pathways: list[RemediationPathway] = []
         for pathway in kb_replay_output.pathways:
-            # Use the KB recipe's confidence (already proven) — attach validation
-            # metadata indicating this came from the knowledge base.
             pathway.validation_metadata = ValidationMetadata(
-                status="validated",
-                sources=["Knowledge Base (proven fix from prior successful run)"],
+                status="proven",
+                sources=[f"Knowledge Base #{kb_replay_id} (proven recipe)"],
                 timestamp=datetime.now(UTC).isoformat(),
                 confidence="high",
             )

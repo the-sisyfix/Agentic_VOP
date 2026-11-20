@@ -330,7 +330,7 @@ class ValidationMetadata(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["validated", "partial", "unvalidated"]
+    status: Literal["proven", "validated", "unverified", "partial", "unvalidated"]
     sources: list[str] = Field(
         default_factory=list,
         description="Citation names — e.g. ['AWS Documentation', 'NVD', 'CIS AWS 2.1.5']",
