@@ -151,12 +151,12 @@ export function useDashboardData(chartRange = '14d') {
 
       // ---- stats ----
       const severityBreakdown = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 }
-      let requiringAction = 0
+      let _requiringAction = 0
       for (const row of severityRes.data || []) {
         if (row.severity && severityBreakdown[row.severity] !== undefined) {
           severityBreakdown[row.severity] += 1
         }
-        if (row.severity === 'Critical' || row.severity === 'High') requiringAction += 1
+        if (row.severity === 'Critical' || row.severity === 'High') _requiringAction += 1
       }
       // Count issues added today
       const todayStr = new Date().toISOString().slice(0, 10)
@@ -166,21 +166,21 @@ export function useDashboardData(chartRange = '14d') {
       }
 
       // Count remediation packages that are ready
-      let readyToRemediate = 0
-      let validated = 0
+      let _readyToRemediate = 0
+      let _validated = 0
       let confidenceSum = 0
       let confidenceCount = 0
-      let remediated = 0
+      let _remediated = 0
       let mttrSum = 0
       let mttrCount = 0
       const remPkgData = remPkgRes.packages || []
       if (remPkgData.length > 0) {
         for (const row of remPkgData) {
           if (row.status === 'awaiting_approval' || row.status === 'ready_for_execution') {
-            readyToRemediate += 1
+            _readyToRemediate += 1
           }
           if (row.status === 'ready_for_execution') {
-            remediated += 1
+            _remediated += 1
             // Compute MTTR: time from created_at to approved_at
             if (row.created_at && row.approved_at) {
               const created = new Date(row.created_at)
@@ -196,7 +196,7 @@ export function useDashboardData(chartRange = '14d') {
           const pwIdx = row.recommended_pathway_index ?? 0
           const pw = row.pathways?.[pwIdx] || row.pathways?.[0]
           if (pw?.validation_metadata?.status === 'validated') {
-            validated += 1
+            _validated += 1
           }
           if (pw?.confidence_score != null) {
             confidenceSum += pw.confidence_score
@@ -206,7 +206,7 @@ export function useDashboardData(chartRange = '14d') {
       } else {
         // Fallback: count issues that have an AI-suggested fix
         for (const row of severityRes.data || []) {
-          if (row.remediation_suggestion) readyToRemediate += 1
+          if (row.remediation_suggestion) _readyToRemediate += 1
         }
       }
 

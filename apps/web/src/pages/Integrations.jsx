@@ -15,6 +15,17 @@ const BUILTIN_SCANNERS = [
   { tool: 'zap', label: 'OWASP ZAP' },
 ]
 
+// Scanners we deliberately hide from the "Run a scan" picker even if they're
+// registered. Dormant placeholders (no runnable endpoint) + redundant
+// duplicates of the -ec2 scanners we actually run on the demo fleet.
+// Module-level so the Set reference is stable across renders.
+const HIDDEN_SCANNERS = new Set([
+  'burp-suite', 'checkov-cspm', 'grype', 'qualys-vmdr-vuln',
+  'snyk-appsec', 'sonarqube-appsec', 'tenable-nessus-vuln',
+  'trivy-cloud', 'servicenow-ticket',
+  'semgrep-appsec', 'nvd-threat',
+])
+
 // Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some
 // scanners are registered under shorter slugs in connection_registry
 // (e.g. "zap"). This map lets the "configured" dot light up for those
@@ -182,16 +193,6 @@ export default function Integrations() {
   useEffect(() => {
     refreshRegisteredScanners()
   }, [refreshRegisteredScanners])
-
-  // Scanners we deliberately hide from the "Run a scan" picker even if they're
-  // registered. Dormant placeholders (no runnable endpoint) + redundant
-  // duplicates of the -ec2 scanners we actually run on the demo fleet.
-  const HIDDEN_SCANNERS = new Set([
-    'burp-suite', 'checkov-cspm', 'grype', 'qualys-vmdr-vuln',
-    'snyk-appsec', 'sonarqube-appsec', 'tenable-nessus-vuln',
-    'trivy-cloud', 'servicenow-ticket',
-    'semgrep-appsec', 'nvd-threat',
-  ])
 
   // Merge built-ins with the registered set (registered wins on tool collision).
   // Label resolution: prefer catalog's display name when the slug matches a
