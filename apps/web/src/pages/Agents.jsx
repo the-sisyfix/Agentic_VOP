@@ -3,6 +3,7 @@ import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import AgentModelConfig from '../components/AgentModelConfig'
 import { supabase } from '../lib/supabase'
+import { stripEc2 } from '../lib/scannerName'
 import '../styles/Agents.css'
 
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -379,35 +380,35 @@ export default function Agents() {
         name: 'Master Orchestrator',
         role: 'master',
         status: isActiveInRun('master') ? 'working' : 'idle',
-        currentTask: masterEvent?.message || null,
+        currentTask: stripEc2(masterEvent?.message) || null,
       },
       {
         id: 'sub-agent-1',
         name: 'Sub-Agent 1 — Smart Connector',
         role: 'sub',
         status: isActiveInRun('sub-agent-1') ? 'working' : 'idle',
-        currentTask: sub1Event?.message || null,
+        currentTask: stripEc2(sub1Event?.message) || null,
       },
       {
         id: 'sub-agent-2',
         name: 'Sub-Agent 2 — Enrichment Specialist',
         role: 'sub',
         status: isActiveInRun('sub-agent-2') ? 'working' : 'idle',
-        currentTask: sub2Event?.message || null,
+        currentTask: stripEc2(sub2Event?.message) || null,
       },
       {
         id: 'sub-agent-3',
         name: 'Sub-Agent 3 — Remediation Planner',
         role: 'sub',
         status: isActiveInRun('sub-agent-3') ? 'working' : 'idle',
-        currentTask: sub3Event?.message || null,
+        currentTask: stripEc2(sub3Event?.message) || null,
       },
       {
         id: 'sub-agent-4',
         name: 'Sub-Agent 4 — Fixer',
         role: 'sub',
         status: isActiveInRun('sub-agent-4') ? 'working' : 'idle',
-        currentTask: sub4Event?.message || null,
+        currentTask: stripEc2(sub4Event?.message) || null,
       },
     ]
   }, [runs, traceEvents])
@@ -646,10 +647,6 @@ export default function Agents() {
           <div className="agents-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <h1>Agents</h1>
-              <p className="agents-subtitle">
-                Live trace of master agent and sub-agent communication
-                {pipelineMode === 'demo' && ' — DEMO PIPELINE (5 pre-seeded issues)'}
-              </p>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {[
@@ -981,7 +978,7 @@ export default function Agents() {
                         {ev.taskId && (
                           <span className="trace-task-id">{ev.taskId}</span>
                         )}
-                        <span className="trace-message">{ev.message}</span>
+                        <span className="trace-message">{stripEc2(ev.message)}</span>
                       </div>
                     </div>
                   ))
@@ -1022,7 +1019,7 @@ export default function Agents() {
                 <div className="trace-detail-section">
                   <div className="trace-detail-section-label">Message</div>
                   <pre className="trace-detail-payload">
-                    {selectedTrace.message || '—'}
+                    {stripEc2(selectedTrace.message) || '—'}
                   </pre>
                 </div>
                 {selectedTrace.payload?.missed_cves?.length > 0 && (

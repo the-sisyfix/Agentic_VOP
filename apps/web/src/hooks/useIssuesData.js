@@ -93,10 +93,26 @@ export function useIssuesData() {
       )
       .subscribe()
 
+    // Refetch when tab becomes visible or window gains focus. Throttled to
+    // one call per 5s to coalesce rapid focus/blur events.
+    let lastRefreshAt = Date.now()
+    const MIN_REFRESH_INTERVAL_MS = 5_000
+    const maybeRefresh = () => {
+      const now = Date.now()
+      if (!mounted || document.hidden) return
+      if (now - lastRefreshAt < MIN_REFRESH_INTERVAL_MS) return
+      lastRefreshAt = now
+      loadAll()
+    }
+    document.addEventListener('visibilitychange', maybeRefresh)
+    window.addEventListener('focus', maybeRefresh)
+
     return () => {
       mounted = false
       if (debounceTimer) clearTimeout(debounceTimer)
       supabase.removeChannel(channel)
+      document.removeEventListener('visibilitychange', maybeRefresh)
+      window.removeEventListener('focus', maybeRefresh)
     }
   }, [])
 

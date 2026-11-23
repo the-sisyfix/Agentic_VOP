@@ -6,6 +6,7 @@ import ColumnToggle from '../components/ColumnToggle'
 import '../styles/Issues.css'
 import SeverityFilter from '../components/SeverityFilter'
 import { useIssuesData } from '../hooks/useIssuesData'
+import { formatScannerName } from '../lib/scannerName'
 
 // Approx vertical overhead above the table body: topbar + page header +
 // filters/toolbar + pagination footer = ~360px on most layouts.
@@ -329,7 +330,7 @@ export default function Issues() {
                                 )}
 
                                 <div className="tooltip-source-tag">
-                                  Source: {issue.source}
+                                  Source: {formatScannerName(issue.source)}
                                 </div>
                               </div>
                             </div>
@@ -344,7 +345,7 @@ export default function Issues() {
                         )}
                         {isVisible('source') && (
                           <td>
-                            <span className="issues-source">{issue.source}</span>
+                            <span className="issues-source">{formatScannerName(issue.source)}</span>
                           </td>
                         )}
                         {isVisible('first_detected') && (
@@ -493,7 +494,7 @@ export default function Issues() {
                 </div>
                 <div className="issue-drawer-item">
                   <span className="issue-drawer-label">Source</span>
-                  <span className="issue-drawer-value">{selectedIssue.source || '—'}</span>
+                  <span className="issue-drawer-value">{formatScannerName(selectedIssue.source) || '—'}</span>
                 </div>
                 <div className="issue-drawer-item">
                   <span className="issue-drawer-label">First Detected</span>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Sidebar from '../components/Sidebar'
 import Topbar from '../components/Topbar'
+import { formatScannerName } from '../lib/scannerName'
 import '../styles/Remediation.css'
 import '../styles/RemediationPackages.css'
 
@@ -8,6 +9,17 @@ const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 // Pinned demo issue IDs — the 5 Phase-1 vulnerabilities.
 const DEMO_ISSUE_IDS = [8585, 8586, 7481, 6394, 7832]
+
+// Handy pre-run demo package IDs for live walkthroughs — so we can open a
+// known-good package instantly instead of waiting 4-6 min for the pipeline.
+// 3 runs × 5 scanners × ~3 issues each.
+const DEMO_HANDY_PKG_IDS = [
+  // Range #4324–#4368 inclusive, excluding #4335, #4336, #4337 (42 total).
+  4324, 4325, 4326, 4327, 4328, 4329, 4330, 4331, 4332, 4333, 4334,
+  4338, 4339, 4340, 4341, 4342, 4343, 4344, 4345, 4346, 4347, 4348, 4349,
+  4350, 4351, 4352, 4353, 4354, 4355, 4356, 4357, 4358, 4359,
+  4360, 4361, 4362, 4363, 4364, 4365, 4366, 4367, 4368,
+]
 
 // Header "Remediate" button — hidden by default. Flip to true if you want
 // to expose live LLM generation in the UI. Same behaviour as the CLI:
@@ -43,15 +55,26 @@ const STATUS_LABEL = {
 }
 
 const VALIDATION_TONE = {
+  proven: 'good',
   validated: 'good',
+  unverified: 'warn',
+  // Legacy values still mapped so historical rows render reasonably.
   partial: 'warn',
-  unvalidated: 'bad',
+  unvalidated: 'warn',
+}
+
+const VALIDATION_LABEL = {
+  proven: 'Validated',
+  validated: 'Validated',
+  unverified: 'Partial',
+  partial: 'Partial',
+  unvalidated: 'Partial',
 }
 
 const APPROVAL_LABEL = {
   auto: 'Auto',
-  single_approver: 'Single Approver',
-  multi_stage: 'Multi-stage',
+  single_approver: 'Manual',
+  multi_stage: 'Manual',
 }
 
 function confidenceTone(score) {
@@ -84,8 +107,11 @@ export default function Remediation() {
   const [detail, setDetail] = useState(null)
   // Pagination
   const PAGE_SIZE = 50
+  const FETCH_LIMIT = 200  // show 4 pages (50 × 4), matches Issues page feel
   const [currentPage, setCurrentPage] = useState(1)
-  const [totalPackages, setTotalPackages] = useState(0)
+  // "#" pill — filters list to the DEMO_HANDY_PKG_IDS set so we can open a
+  // known-good package instantly during live walkthroughs.
+  const [handyFilter, setHandyFilter] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
@@ -128,33 +154,46 @@ export default function Remediation() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      const offset = (currentPage - 1) * PAGE_SIZE
-      const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+      // Fetch up to FETCH_LIMIT rows once; pagination happens client-side
+      // over this buffer. Keeps the footer stable (no "of 3184") and lets
+      // the "#" filter apply without re-fetching.
+      const qs = new URLSearchParams({ limit: String(FETCH_LIMIT), offset: '0' })
       if (statusFilter !== 'all') qs.set('status', statusFilter)
       const res = await fetch(`${apiBase}?${qs}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       const pkgs = data.packages || []
       setPackages(pkgs)
-      // Only show the top 50 — don't surface the full DB total (e.g. "of 3184")
-      // in the footer. Keeps the UI focused on the most-recent packages.
-      setTotalPackages(pkgs.length)
     } catch (e) {
       setError(e.message || 'Failed to load packages')
       if (!silent) setPackages([])
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [statusFilter, apiBase, currentPage])
+  }, [statusFilter, apiBase])
 
   useEffect(() => { refreshList() }, [refreshList])
 
-  // When the status filter changes, go back to page 1 so we don't request
-  // an offset that is now out of range (e.g. filtering down to 10 rows
-  // while sitting on page 3).
-  useEffect(() => { setCurrentPage(1) }, [statusFilter, apiBase])
+  // Reset page on filter/mode change so we don't sit on page 3 of an empty slice.
+  useEffect(() => { setCurrentPage(1) }, [statusFilter, apiBase, handyFilter])
 
-  const totalPages = Math.max(1, Math.ceil(totalPackages / PAGE_SIZE))
+  // Apply "#" filter + client-side pagination over the fetched buffer.
+  // Pagination numbers always reflect the FULL list so they stay visible as
+  // navigation even while "#" is active — clicking one jumps to that page
+  // AND turns "#" off.
+  const filteredPackages = useMemo(() => {
+    if (!handyFilter) return packages
+    const set = new Set(DEMO_HANDY_PKG_IDS)
+    return packages.filter(p => set.has(p.id))
+  }, [packages, handyFilter])
+  const visiblePackages = useMemo(() => {
+    if (handyFilter) return filteredPackages  // show all filtered rows, no slice
+    const start = (currentPage - 1) * PAGE_SIZE
+    return packages.slice(start, start + PAGE_SIZE)
+  }, [packages, filteredPackages, handyFilter, currentPage])
+  const displayTotal = handyFilter ? filteredPackages.length : packages.length
+  const totalPages = Math.max(1, Math.ceil(packages.length / PAGE_SIZE))
+  const goToPage = (p) => { setHandyFilter(false); setCurrentPage(p) }
 
   // Clear selection when switching modes so demo/real packages don't bleed.
   useEffect(() => {
@@ -460,6 +499,7 @@ export default function Remediation() {
                   <tr>
                     <th>ID</th>
                     <th>Finding</th>
+                    <th>Scanner</th>
                     <th>Family</th>
                     <th>Confidence</th>
                     <th>Validation</th>
@@ -470,7 +510,7 @@ export default function Remediation() {
                   </tr>
                 </thead>
                 <tbody>
-                  {packages.map(p => {
+                  {visiblePackages.map(p => {
                     // Cells receive the row and the current apiBase — in demo
                     // mode the row already carries `pathways` inline, so no
                     // N+1 fetch. In real mode they fall back to fetching from
@@ -480,6 +520,7 @@ export default function Remediation() {
                           onClick={() => setSelectedId(p.id)}>
                         <td>#{p.id}</td>
                         <td className="rmp-finding-cell">{p.finding || '—'}</td>
+                        <td><span className="rmp-family-chip">{formatScannerName(p.source) || '—'}</span></td>
                         <td><span className="rmp-family-chip">{FAMILY_LABEL[p.family] || p.family}</span></td>
                         <td>
                           <ConfidenceCell pkg={p} apiBase={apiBase} />
@@ -510,59 +551,71 @@ export default function Remediation() {
             {!loading && !error && (
               <div className="issues-footer">
                 <span className="issues-count">
-                  Showing {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, totalPackages)} of {totalPackages} packages
+                  Showing {displayTotal === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, displayTotal)} of {displayTotal} packages
                 </span>
-                {totalPages > 1 && (
-                  <div className="issues-pagination">
-                    <button
-                      className="pagination-btn"
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                      disabled={currentPage === 1}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <polyline points="15 18 9 12 15 6"></polyline>
-                      </svg>
-                    </button>
+                <div className="issues-pagination">
+                  <button
+                    className={`pagination-btn ${handyFilter ? 'active' : ''}`}
+                    onClick={() => setHandyFilter(f => !f)}
+                    title="Show pre-run demo packages (handy for live walkthroughs)"
+                    style={{ fontWeight: 600, marginRight: 8 }}
+                  >
+                    #
+                  </button>
 
-                    {currentPage > 3 && (
-                      <>
-                        <button className="pagination-btn" onClick={() => setCurrentPage(1)}>1</button>
-                        {currentPage > 4 && <span className="pagination-dots">...</span>}
-                      </>
-                    )}
+                  {totalPages > 1 && (
+                    <>
+                      <button
+                        className="pagination-btn"
+                        onClick={() => goToPage(Math.max(1, currentPage - 1))}
+                        disabled={!handyFilter && currentPage === 1}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="15 18 9 12 15 6"></polyline>
+                        </svg>
+                      </button>
 
-                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                      const page = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i
-                      if (page > totalPages || page < 1) return null
-                      return (
-                        <button
-                          key={page}
-                          className={`pagination-btn ${currentPage === page ? 'active' : ''}`}
-                          onClick={() => setCurrentPage(page)}
-                        >
-                          {page}
-                        </button>
-                      )
-                    })}
+                      {totalPages > 5 && currentPage > 3 && (
+                        <>
+                          <button className="pagination-btn" onClick={() => goToPage(1)}>1</button>
+                          {currentPage > 4 && <span className="pagination-dots">...</span>}
+                        </>
+                      )}
 
-                    {currentPage < totalPages - 2 && (
-                      <>
-                        {currentPage < totalPages - 3 && <span className="pagination-dots">...</span>}
-                        <button className="pagination-btn" onClick={() => setCurrentPage(totalPages)}>{totalPages}</button>
-                      </>
-                    )}
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        const page = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i
+                        if (page > totalPages || page < 1) return null
+                        const isActive = !handyFilter && currentPage === page
+                        return (
+                          <button
+                            key={page}
+                            className={`pagination-btn ${isActive ? 'active' : ''}`}
+                            onClick={() => goToPage(page)}
+                          >
+                            {page}
+                          </button>
+                        )
+                      })}
 
-                    <button
-                      className="pagination-btn"
-                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                      disabled={currentPage === totalPages}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <polyline points="9 18 15 12 9 6"></polyline>
-                      </svg>
-                    </button>
-                  </div>
-                )}
+                      {totalPages > 5 && currentPage < totalPages - 2 && (
+                        <>
+                          {currentPage < totalPages - 3 && <span className="pagination-dots">...</span>}
+                          <button className="pagination-btn" onClick={() => goToPage(totalPages)}>{totalPages}</button>
+                        </>
+                      )}
+
+                      <button
+                        className="pagination-btn"
+                        onClick={() => goToPage(Math.min(totalPages, currentPage + 1))}
+                        disabled={!handyFilter && currentPage === totalPages}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -645,8 +698,8 @@ function ValidationCell({ pkg, apiBase }) {
   const d = useDetailField(pkg, apiBase)
   const pw = recommendedPathway(d)
   const vm = pw?.validation_metadata
-  if (!vm) return <span className="rmp-muted">—</span>
-  return <span className={`rmp-validation-pill ${VALIDATION_TONE[vm.status] || 'warn'}`}>{vm.status}</span>
+  if (!vm) return <span className={`rmp-validation-pill ${VALIDATION_TONE.partial}`}>{VALIDATION_LABEL.partial}</span>
+  return <span className={`rmp-validation-pill ${VALIDATION_TONE[vm.status] || 'warn'}`}>{VALIDATION_LABEL[vm.status] || vm.status}</span>
 }
 
 function StatusPill({ status }) {

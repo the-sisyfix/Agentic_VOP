@@ -5,6 +5,7 @@ import MultiSelectFilter from '../components/MultiSelectFilter'
 import ScannerEndpointModal from '../components/ScannerEndpointModal'
 import '../styles/Integrations.css'
 import '../styles/AgentModelConfig.css' // reuse .amc-banner-* helpers
+import { formatScannerName } from '../lib/scannerName'
 
 // Built-in scanners that always show in "Run a scan" even before any
 // custom registration. Anything else added by the user via the modal
@@ -13,6 +14,17 @@ const BUILTIN_SCANNERS = [
   { tool: 'osv', label: 'OSV.dev' },
   { tool: 'zap', label: 'OWASP ZAP' },
 ]
+
+// Scanners we deliberately hide from the "Run a scan" picker even if they're
+// registered. Dormant placeholders (no runnable endpoint) + redundant
+// duplicates of the -ec2 scanners we actually run on the demo fleet.
+// Module-level so the Set reference is stable across renders.
+const HIDDEN_SCANNERS = new Set([
+  'burp-suite', 'checkov-cspm', 'grype', 'qualys-vmdr-vuln',
+  'snyk-appsec', 'sonarqube-appsec', 'tenable-nessus-vuln',
+  'trivy-cloud', 'servicenow-ticket',
+  'semgrep-appsec', 'nvd-threat',
+])
 
 // Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some
 // scanners are registered under shorter slugs in connection_registry
@@ -55,7 +67,6 @@ const INTEGRATION_CATALOG = [
     oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
-    apiTool('semgrep-appsec', 'Semgrep'),
     apiTool('snyk-appsec', 'Snyk'),
     apiTool('sonarqube-appsec', 'SonarQube'),
     apiTool('veracode-appsec', 'Veracode'),
@@ -70,13 +81,10 @@ const INTEGRATION_CATALOG = [
   { category: 'Cloud Security', tools: [
     apiTool('aws-inspect-cloud', 'AWS Inspect'),
     apiTool('aws-securityhub-cloud', 'AWS Security Hub (CSPM)'),
-    apiTool('checkov-cspm', 'Checkov'),
     apiTool('crowdstrike-cloud', 'HorizonCSPM (Crowdstrike)'),
     apiTool('grype', 'Anchore Grype'),
-    apiTool('iac-scanning-cloud', 'Checkov (IaC Scanning)'),
     apiTool('paloalto-cloud', 'Prisma Cloud (Palo Alto)'),
     apiTool('tenable-cloud', 'Tenable Cloud Security'),
-    apiTool('trivy-cloud', 'Trivy'),
     apiTool('wiz-cloud', 'Wiz'),
   ]},
   { category: 'DSPM / DLP', tools: [
@@ -196,7 +204,7 @@ export default function Integrations() {
     }
     const map = new Map(BUILTIN_SCANNERS.map((s) => [s.tool, s]))
     for (const s of registeredScanners) {
-      if (s.enabled) {
+      if (s.enabled && !HIDDEN_SCANNERS.has(s.tool)) {
         map.set(s.tool, {
           tool: s.tool,
           label: catalogNameById.get(s.tool) || s.tool,
@@ -531,8 +539,8 @@ export default function Integrations() {
                         </svg>
                       )}
                     </span>
-                    <span className="scanner-card-label">{s.label}</span>
-                    <span className="scanner-card-tool">{s.tool}</span>
+                    <span className="scanner-card-label">{formatScannerName(s.label)}</span>
+                    <span className="scanner-card-tool">{formatScannerName(s.tool)}</span>
                   </button>
                 )
               })}

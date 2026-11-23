@@ -38,7 +38,6 @@ from .classifier import classify_finding
 from .confidence import compute_confidence, compute_confidence_agentic
 from .planner import (
     _agent_validation_metadata,
-    _derive_approval,
     _extract_iac_context,
     _issue_payload,
     _pattern_payload,
@@ -608,10 +607,19 @@ def _plan_and_enrich(
         )
 
         if kb_replay_output is not None:
-            from ...models import RemediationPathway  # noqa: PLC0415, F401
+            from ...models import RemediationPathway, ValidationMetadata  # noqa: PLC0415, F401
+            from datetime import datetime as _dt, UTC as _UTC  # noqa: PLC0415
 
+            # KB entries only exist because a prior fix succeeded (or we promoted
+            # one from a prior success). Any KB replay is proven by definition.
             enriched_pathways: list[RemediationPathway] = []
             for pathway in kb_replay_output.pathways:
+                pathway.validation_metadata = ValidationMetadata(
+                    status="proven",
+                    sources=[f"Knowledge Base #{kb_replay_id} (proven recipe)"],
+                    timestamp=_dt.now(_UTC).isoformat(),
+                    confidence="high",
+                )
                 pathway.confidence_score = 95
                 pathway.confidence_components = {
                     "source": "kb_replay",
@@ -982,7 +990,6 @@ def _plan_and_enrich(
         range(len(enriched_pathways)),
         key=lambda i: enriched_pathways[i].confidence_score or 0,
     )
-    recommended_score = enriched_pathways[recommended_idx].confidence_score or 0
 
     return RemediationPackage(
         issue_id=int(issue["id"]),
@@ -992,7 +999,9 @@ def _plan_and_enrich(
         impact=llm_output.impact,
         pathways=enriched_pathways,
         recommended_pathway_index=recommended_idx,
-        approval_required=_derive_approval(recommended_score, issue.get("priority")),
+        # Demo pipeline is end-to-end automation by definition.
+        # Master overrides to "single_approver" when any HITL mode is on.
+        approval_required="auto",
     )
 
 
