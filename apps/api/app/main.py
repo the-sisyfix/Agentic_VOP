@@ -930,15 +930,27 @@ def reset_env2_baseline() -> dict:
             detail="fixer_env2_instance_id not configured — set it in .env",
         )
 
+    # The state bucket / key / lock table are read from backend.hcl ON THE
+    # INSTANCE (written by user-data per instance), so the same reset works for
+    # env2 (PROD) and env3 (DEV) without hardcoding either one's state path.
     reset_script = """#!/bin/bash
 set -e
 cd /opt/vuln-labs/cspm-lab
+STATE_BUCKET=$(awk -F'"' '/^bucket/ {print $2}' backend.hcl)
+STATE_KEY=$(awk -F'"' '/^key/ {print $2}' backend.hcl)
+LOCK_TABLE=$(awk -F'"' '/^dynamodb_table/ {print $2}' backend.hcl)
+if [ -z "$STATE_BUCKET" ] || [ -z "$STATE_KEY" ] || [ -z "$LOCK_TABLE" ]; then
+  echo "ERROR: could not read bucket/key/dynamodb_table from backend.hcl — aborting before touching anything"
+  exit 1
+fi
+echo "Using state: s3://$STATE_BUCKET/$STATE_KEY (lock table: $LOCK_TABLE)"
 echo "=== STEP 1: terraform destroy ==="
 terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5 || echo "WARN: destroy had errors (may be clean already)"
 echo "=== STEP 2: delete S3 state file ==="
-aws s3 rm "s3://sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate" 2>&1 || echo "(state may already be empty)"
+aws s3 rm "s3://$STATE_BUCKET/$STATE_KEY" 2>&1 || echo "(state may already be empty)"
 echo "=== STEP 3: delete DynamoDB lock entry ==="
-aws dynamodb delete-item --table-name sisyfix-terraform-locks --key '{"LockID":{"S":"sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate-md5"}}' 2>&1 || echo "(lock may not exist)"
+LOCK_KEY=$(printf '{"LockID":{"S":"%s/%s-md5"}}' "$STATE_BUCKET" "$STATE_KEY")
+aws dynamodb delete-item --table-name "$LOCK_TABLE" --key "$LOCK_KEY" 2>&1 || echo "(lock may not exist)"
 echo "=== STEP 4: restore main.tf + wipe .bak files ==="
 if [ ! -f main.tf.original ]; then
   echo "WARN: main.tf.original not found — regenerating from main.tf"
@@ -959,7 +971,7 @@ echo "=== DONE ==="
     started = datetime.now(UTC)
 
     try:
-        ssm = boto3.client("ssm", region_name="us-east-1")
+        ssm = boto3.client("ssm", region_name=settings.aws_region)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
@@ -1601,10 +1613,11 @@ def reset_env2_serverless() -> dict:
         )
 
     # Same substitutions as modules/lab-instance/user-data.sh.tpl performs on
-    # first-boot rendering. Keep in sync with env2 name_prefix in env2/main.tf.
+    # first-boot rendering. name_prefix comes from FIXER_LAB_NAME_PREFIX and must
+    # match the name_prefix of the instance in FIXER_ENV2_INSTANCE_ID.
     tf_rendered = (
         tf_template.read_text(encoding="utf-8")
-        .replace("NAME_PLACEHOLDER", "vop-vuln-lab-env2")
+        .replace("NAME_PLACEHOLDER", settings.fixer_lab_name_prefix)
         .replace("REGION_PLACEHOLDER", settings.aws_region or "us-east-1")
     )
 
