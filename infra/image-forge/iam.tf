@@ -76,6 +76,9 @@ resource "aws_iam_role_policy" "build_ecr_push" {
 
 # S3: the build box uploads the SBOM it generates to the SBOM bucket under the
 # sboms/ prefix (keyed by image digest). Write-only + list; no read needed.
+# The build box also uploads the itemized residual report (residual/<digest>.json)
+# and the OpenVEX document (vex/<digest>.openvex.json) alongside the SBOM, so the
+# write + list scope covers all three artifact prefixes.
 resource "aws_iam_role_policy" "build_sbom_put" {
   name = "${local.name}-sbom-put-policy"
   role = aws_iam_role.build.id
@@ -84,19 +87,23 @@ resource "aws_iam_role_policy" "build_sbom_put" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "SBOMPutObject"
-        Effect   = "Allow"
-        Action   = ["s3:PutObject"]
-        Resource = "${local.sbom_bucket_arn}/sboms/*"
+        Sid    = "ArtifactsPutObject"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = [
+          "${local.sbom_bucket_arn}/sboms/*",
+          "${local.sbom_bucket_arn}/residual/*",
+          "${local.sbom_bucket_arn}/vex/*",
+        ]
       },
       {
-        Sid      = "SBOMListBucketPrefix"
+        Sid      = "ArtifactsListBucketPrefix"
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
         Resource = local.sbom_bucket_arn
         Condition = {
           StringLike = {
-            "s3:prefix" = "sboms/*"
+            "s3:prefix" = ["sboms/*", "residual/*", "vex/*"]
           }
         }
       }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
@@ -25,8 +25,11 @@ export default function Dashboard() {
   const [showCveTicker] = useState(true)
   const [riskReducedRange, setRiskReducedRange] = useState('14d')
 
-  const { stats, latestCves, topRiskDrivers, chartData, exposureMap } =
+  const { stats, latestCves, topRiskDrivers, chartData, exposureMap, loading } =
     useDashboardData(riskReducedRange)
+  // Show the shimmer only on a true cold load (no cached value to paint).
+  // Returning visits hydrate from localStorage and skip the skeleton entirely.
+  const isColdLoading = loading && stats.total === 0
 
   const { Critical = 0, High = 0, Medium = 0 } = stats.severityBreakdown || {}
 
@@ -72,10 +75,12 @@ export default function Dashboard() {
         <main className="dashboard-main dashboard-dark">
           <div className="stat-cards-row">
             {statCards.map((card, index) => (
-              <div key={index} className="stat-card">
+              <div key={index} className={`stat-card ${isColdLoading ? 'is-loading' : ''}`}>
                 <div className="stat-card-title">{card.title}</div>
                 <div className="stat-card-body">
-                  <span className="stat-card-value">{card.value}</span>
+                  <span className="stat-card-value">
+                    {isColdLoading ? <span className="skeleton-block skeleton-block-lg" /> : card.value}
+                  </span>
                   {card.delta > 0 && (
                     <span className="stat-delta-badge" title={`Was ${card.previousTotal} before today. +${card.delta} added on ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}>
                       +{card.delta}
@@ -352,7 +357,29 @@ function TopRiskDrivers({ data = [] }) {
 }
 
 function RiskReduced({ chartData = [], timeRange = '14d', setTimeRange = () => {} }) {
-  const [topFixes] = useState([])
+  // Top fixes — pulled live from the backend. The endpoint counts
+  // demo.remediation_packages rows with status='fixed' since the time window
+  // and groups by check_id. Automated flag = true if there's an active KB
+  // entry with at least one past success.
+  const [topFixes, setTopFixes] = useState([])
+  useEffect(() => {
+    const days = timeRange === '90d' ? 90 : timeRange === '30d' ? 30 : 14
+    const since = new Date(Date.now() - days * 86400 * 1000).toISOString()
+    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    let alive = true
+    fetch(`${apiBase}/admin/dashboard-top-fixes/demo?since=${encodeURIComponent(since)}&limit=5`)
+      .then(r => r.ok ? r.json() : { fixes: [] })
+      .then(data => {
+        if (!alive) return
+        setTopFixes((data.fixes || []).map(f => ({
+          name: f.check_id,
+          count: f.count,
+          automated: f.automated,
+        })))
+      })
+      .catch(() => { if (alive) setTopFixes([]) })
+    return () => { alive = false }
+  }, [timeRange])
 
   return (
     <div className="risk-reduced-card">
@@ -407,19 +434,28 @@ function RiskReduced({ chartData = [], timeRange = '14d', setTimeRange = () => {
         <h3>Top fixes that reduced most risk</h3>
         {topFixes.length === 0 ? (
           <p style={{ color: 'var(--dash-text-secondary)', fontSize: '0.85rem' }}>No data yet</p>
-        ) : (
-          topFixes.map((fix, index) => (
-            <div key={index} className="top-fix-item">
-              <span className="fix-indicator"></span>
-              <span className="fix-name">{fix.name}</span>
-              <div className="fix-bar">
-                <div className="fix-bar-fill" style={{ width: `${(fix.count / 400) * 100}%` }}></div>
+        ) : (() => {
+          // Bar widths are relative to the leading fix so small real counts
+          // still fill the row. The top fix anchors at ~100% and the others
+          // scale down proportionally — the shape stays honest.
+          const topCount = Math.max(...topFixes.map(f => f.count || 0), 1)
+          return topFixes.map((fix, index) => {
+            const pct = Math.round((fix.count / topCount) * 100)
+            return (
+              <div key={index} className="top-fix-item">
+                <span className="fix-indicator"></span>
+                <span className="fix-name">{fix.name}</span>
+                <div className="fix-bar">
+                  <div className="fix-bar-fill" style={{ width: `${pct}%` }}></div>
+                </div>
+                <span className="fix-count">{fix.count}</span>
+                <span className="fix-badge-cell">
+                  {fix.automated && <span className="fix-badge">Automation</span>}
+                </span>
               </div>
-              <span className="fix-count">{fix.count}</span>
-              {fix.automated && <span className="fix-badge">Automation</span>}
-            </div>
-          ))
-        )}
+            )
+          })
+        })()}
       </div>
     </div>
   )
@@ -548,17 +584,7 @@ function SeverityBar({ critical = 0, high = 0, medium = 0 }) {
   )
 }
 
-// Map compliance tag → class hint so styling can colour each chip
-// independently. Tags we don't recognise fall back to a neutral chip.
-const TAG_CLASS_HINTS = {
-  'PCI-DSS': 'pci',
-  HIPAA: 'hipaa',
-  GDPR: 'gdpr',
-  SOC2: 'soc2',
-}
-
 function RegulatoryComplianceCard({ data }) {
-  const tags = data?.tags ?? []
   const findingCount = data?.findingCount ?? 0
   const critical = data?.critical ?? 0
   const high = data?.high ?? 0
@@ -577,27 +603,6 @@ function RegulatoryComplianceCard({ data }) {
         <div className="exposure-compact-content">
           <span className="exposure-compact-title">Regulatory Impact</span>
           <span className="exposure-compact-subtitle">Compliance scope at risk</span>
-          {/* Chips live inside the header content so they stay on the left
-              and never collide with the value strip on the right. */}
-          <div className="compliance-tags-container">
-            {tags.length === 0 ? (
-              <>
-                <span className="compliance-tag pci">PCI-DSS</span>
-                <span className="compliance-tag hipaa">HIPAA</span>
-                <span className="compliance-tag gdpr">GDPR</span>
-              </>
-            ) : (
-              tags.map((t) => (
-                <span
-                  key={t.tag}
-                  className={`compliance-tag ${TAG_CLASS_HINTS[t.tag] || ''}`}
-                  title={`${t.assets} ${t.assets === 1 ? 'asset' : 'assets'} · ${t.findings} findings`}
-                >
-                  {t.tag} {t.assets}
-                </span>
-              ))
-            )}
-          </div>
         </div>
       </div>
 

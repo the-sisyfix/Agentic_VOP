@@ -112,3 +112,15 @@ variable "trivy_version" {
   type        = string
   default     = "0.69.3"
 }
+
+variable "copa_version" {
+  description = "Project Copacetic (copa) version — in-place OS-package patching. Must match a release tag at github.com/project-copacetic/copacetic/releases (without the leading 'v'); arm64 tarball must exist for it."
+  type        = string
+  default     = "0.9.0"
+}
+
+variable "buildkit_image" {
+  description = "moby/buildkit image copa connects to for applying patch layers. Pre-pulled at bootstrap and started at run time by the hardening strategy."
+  type        = string
+  default     = "moby/buildkit:v0.12.5"
+}

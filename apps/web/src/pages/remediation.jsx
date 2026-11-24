@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Sidebar from '../components/Sidebar'
 import Topbar from '../components/Topbar'
+import { formatScannerName } from '../lib/scannerName'
 import '../styles/Remediation.css'
 import '../styles/RemediationPackages.css'
 
@@ -8,6 +9,17 @@ const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 // Pinned demo issue IDs — the 5 Phase-1 vulnerabilities.
 const DEMO_ISSUE_IDS = [8585, 8586, 7481, 6394, 7832]
+
+// Handy pre-run demo package IDs for live walkthroughs — so we can open a
+// known-good package instantly instead of waiting 4-6 min for the pipeline.
+// 3 runs × 5 scanners × ~3 issues each.
+const DEMO_HANDY_PKG_IDS = [
+  // Range #4324–#4368 inclusive, excluding #4335, #4336, #4337 (42 total).
+  4324, 4325, 4326, 4327, 4328, 4329, 4330, 4331, 4332, 4333, 4334,
+  4338, 4339, 4340, 4341, 4342, 4343, 4344, 4345, 4346, 4347, 4348, 4349,
+  4350, 4351, 4352, 4353, 4354, 4355, 4356, 4357, 4358, 4359,
+  4360, 4361, 4362, 4363, 4364, 4365, 4366, 4367, 4368,
+]
 
 // Header "Remediate" button — hidden by default. Flip to true if you want
 // to expose live LLM generation in the UI. Same behaviour as the CLI:
@@ -43,15 +55,26 @@ const STATUS_LABEL = {
 }
 
 const VALIDATION_TONE = {
+  proven: 'good',
   validated: 'good',
+  unverified: 'warn',
+  // Legacy values still mapped so historical rows render reasonably.
   partial: 'warn',
-  unvalidated: 'bad',
+  unvalidated: 'warn',
+}
+
+const VALIDATION_LABEL = {
+  proven: 'Validated',
+  validated: 'Validated',
+  unverified: 'Partial',
+  partial: 'Partial',
+  unvalidated: 'Partial',
 }
 
 const APPROVAL_LABEL = {
   auto: 'Auto',
-  single_approver: 'Single Approver',
-  multi_stage: 'Multi-stage',
+  single_approver: 'Manual',
+  multi_stage: 'Manual',
 }
 
 function confidenceTone(score) {
@@ -82,6 +105,13 @@ export default function Remediation() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
   const [detail, setDetail] = useState(null)
+  // Pagination
+  const PAGE_SIZE = 50
+  const FETCH_LIMIT = 200  // show 4 pages (50 × 4), matches Issues page feel
+  const [currentPage, setCurrentPage] = useState(1)
+  // "#" pill — filters list to the DEMO_HANDY_PKG_IDS set so we can open a
+  // known-good package instantly during live walkthroughs.
+  const [handyFilter, setHandyFilter] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [toast, setToast] = useState(null)
@@ -124,13 +154,16 @@ export default function Remediation() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      const url = statusFilter === 'all'
-        ? apiBase
-        : `${apiBase}?status=${statusFilter}`
-      const res = await fetch(url)
+      // Fetch up to FETCH_LIMIT rows once; pagination happens client-side
+      // over this buffer. Keeps the footer stable (no "of 3184") and lets
+      // the "#" filter apply without re-fetching.
+      const qs = new URLSearchParams({ limit: String(FETCH_LIMIT), offset: '0' })
+      if (statusFilter !== 'all') qs.set('status', statusFilter)
+      const res = await fetch(`${apiBase}?${qs}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      setPackages(data.packages || [])
+      const pkgs = data.packages || []
+      setPackages(pkgs)
     } catch (e) {
       setError(e.message || 'Failed to load packages')
       if (!silent) setPackages([])
@@ -140,6 +173,27 @@ export default function Remediation() {
   }, [statusFilter, apiBase])
 
   useEffect(() => { refreshList() }, [refreshList])
+
+  // Reset page on filter/mode change so we don't sit on page 3 of an empty slice.
+  useEffect(() => { setCurrentPage(1) }, [statusFilter, apiBase, handyFilter])
+
+  // Apply "#" filter + client-side pagination over the fetched buffer.
+  // Pagination numbers always reflect the FULL list so they stay visible as
+  // navigation even while "#" is active — clicking one jumps to that page
+  // AND turns "#" off.
+  const filteredPackages = useMemo(() => {
+    if (!handyFilter) return packages
+    const set = new Set(DEMO_HANDY_PKG_IDS)
+    return packages.filter(p => set.has(p.id))
+  }, [packages, handyFilter])
+  const visiblePackages = useMemo(() => {
+    if (handyFilter) return filteredPackages  // show all filtered rows, no slice
+    const start = (currentPage - 1) * PAGE_SIZE
+    return packages.slice(start, start + PAGE_SIZE)
+  }, [packages, filteredPackages, handyFilter, currentPage])
+  const displayTotal = handyFilter ? filteredPackages.length : packages.length
+  const totalPages = Math.max(1, Math.ceil(packages.length / PAGE_SIZE))
+  const goToPage = (p) => { setHandyFilter(false); setCurrentPage(p) }
 
   // Clear selection when switching modes so demo/real packages don't bleed.
   useEffect(() => {
@@ -426,6 +480,7 @@ export default function Remediation() {
 
           {/* List */}
           <div className="rmp-list-card">
+            <div className="rmp-list-scroll">
             {loading ? (
               <div className="rmp-empty">Loading packages…</div>
             ) : error ? (
@@ -444,6 +499,7 @@ export default function Remediation() {
                   <tr>
                     <th>ID</th>
                     <th>Finding</th>
+                    <th>Scanner</th>
                     <th>Family</th>
                     <th>Confidence</th>
                     <th>Validation</th>
@@ -454,7 +510,7 @@ export default function Remediation() {
                   </tr>
                 </thead>
                 <tbody>
-                  {packages.map(p => {
+                  {visiblePackages.map(p => {
                     // Cells receive the row and the current apiBase — in demo
                     // mode the row already carries `pathways` inline, so no
                     // N+1 fetch. In real mode they fall back to fetching from
@@ -464,6 +520,7 @@ export default function Remediation() {
                           onClick={() => setSelectedId(p.id)}>
                         <td>#{p.id}</td>
                         <td className="rmp-finding-cell">{p.finding || '—'}</td>
+                        <td><span className="rmp-family-chip">{formatScannerName(p.source) || '—'}</span></td>
                         <td><span className="rmp-family-chip">{FAMILY_LABEL[p.family] || p.family}</span></td>
                         <td>
                           <ConfidenceCell pkg={p} apiBase={apiBase} />
@@ -484,6 +541,82 @@ export default function Remediation() {
                   })}
                 </tbody>
               </table>
+            )}
+            </div>
+
+            {/* Pagination — matches the Issues page footer so the
+                numbered buttons + chevrons + first/last/dots all look
+                the same across the app. Pinned at the bottom of the list
+                card so it stays visible while the table body scrolls. */}
+            {!loading && !error && (
+              <div className="issues-footer">
+                <span className="issues-count">
+                  Showing {displayTotal === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, displayTotal)} of {displayTotal} packages
+                </span>
+                <div className="issues-pagination">
+                  <button
+                    className={`pagination-btn ${handyFilter ? 'active' : ''}`}
+                    onClick={() => setHandyFilter(f => !f)}
+                    title="Show pre-run demo packages (handy for live walkthroughs)"
+                    style={{ fontWeight: 600, marginRight: 8 }}
+                  >
+                    #
+                  </button>
+
+                  {totalPages > 1 && (
+                    <>
+                      <button
+                        className="pagination-btn"
+                        onClick={() => goToPage(Math.max(1, currentPage - 1))}
+                        disabled={!handyFilter && currentPage === 1}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="15 18 9 12 15 6"></polyline>
+                        </svg>
+                      </button>
+
+                      {totalPages > 5 && currentPage > 3 && (
+                        <>
+                          <button className="pagination-btn" onClick={() => goToPage(1)}>1</button>
+                          {currentPage > 4 && <span className="pagination-dots">...</span>}
+                        </>
+                      )}
+
+                      {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                        const page = Math.max(1, Math.min(totalPages - 4, currentPage - 2)) + i
+                        if (page > totalPages || page < 1) return null
+                        const isActive = !handyFilter && currentPage === page
+                        return (
+                          <button
+                            key={page}
+                            className={`pagination-btn ${isActive ? 'active' : ''}`}
+                            onClick={() => goToPage(page)}
+                          >
+                            {page}
+                          </button>
+                        )
+                      })}
+
+                      {totalPages > 5 && currentPage < totalPages - 2 && (
+                        <>
+                          {currentPage < totalPages - 3 && <span className="pagination-dots">...</span>}
+                          <button className="pagination-btn" onClick={() => goToPage(totalPages)}>{totalPages}</button>
+                        </>
+                      )}
+
+                      <button
+                        className="pagination-btn"
+                        onClick={() => goToPage(Math.min(totalPages, currentPage + 1))}
+                        disabled={!handyFilter && currentPage === totalPages}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </main>
@@ -565,8 +698,8 @@ function ValidationCell({ pkg, apiBase }) {
   const d = useDetailField(pkg, apiBase)
   const pw = recommendedPathway(d)
   const vm = pw?.validation_metadata
-  if (!vm) return <span className="rmp-muted">—</span>
-  return <span className={`rmp-validation-pill ${VALIDATION_TONE[vm.status] || 'warn'}`}>{vm.status}</span>
+  if (!vm) return <span className={`rmp-validation-pill ${VALIDATION_TONE.partial}`}>{VALIDATION_LABEL.partial}</span>
+  return <span className={`rmp-validation-pill ${VALIDATION_TONE[vm.status] || 'warn'}`}>{VALIDATION_LABEL[vm.status] || vm.status}</span>
 }
 
 function StatusPill({ status }) {
@@ -630,7 +763,18 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
 
   // Effective status: if locally approved, treat as ready_for_execution
   const effectiveStatus = localApproved ? 'ready_for_execution' : pkg?.status
-  const effectiveTerminal = effectiveStatus === 'ready_for_execution' || effectiveStatus === 'rejected'
+  const effectiveTerminal =
+    effectiveStatus === 'ready_for_execution' ||
+    effectiveStatus === 'rejected' ||
+    // Terminal auto-demo + HITL-approved outcomes — SA-4 already ran, there
+    // is no decision left to make. Hides the pointless Approve/Reject
+    // buttons on packages that are already Fixed / Rolled Back / etc.
+    effectiveStatus === 'fixed' ||
+    effectiveStatus === 'rolled_back' ||
+    effectiveStatus === 'fix_failed' ||
+    effectiveStatus === 'review_rejected' ||
+    effectiveStatus === 'approved' ||
+    effectiveStatus === 'no_fix_needed'
 
   // Build upgrade steps from pathway remediation_steps
   const allSteps = pw?.remediation_steps?.map((s, i) => ({
@@ -765,7 +909,57 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                 {FAMILY_LABEL[pkg.family] || pkg.family}
               </span>
             </div>
-            <StatusPill status={pkg.status} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {pw?.confidence_score && (() => {
+                const tone = confidenceTone(pw.confidence_score)
+                // Sky-blue filled pill — distinct from every other color on
+                // screen: cyan #id pill, orange severity, violet UPGRADE
+                // (CHANGE TYPE row), green Fixed. The number inside carries
+                // the tone so good/warn/bad reads at a glance.
+                // Score number keeps the tone (green/amber/red) so it
+                // reads at a glance; the pill itself gets a lighter solid
+                // fill (below) so the chip pops against the dark card.
+                const numColor = tone === 'good'
+                  ? '#86efac'
+                  : tone === 'warn'
+                    ? '#fde68a'
+                    : '#fda4af'
+                return (
+                  <div
+                    className={`rmp-conf-cell ${tone}`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      background: 'rgba(226, 232, 240, 0.1)',
+                      border: '1px solid rgba(226, 232, 240, 0.25)',
+                      padding: '4px 10px',
+                      borderRadius: 4,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      textTransform: 'uppercase',
+                      letterSpacing: 0.5,
+                      color: '#f1f5f9',
+                    }}
+                  >
+                    Confidence
+                    <span
+                      className="rmp-conf-num"
+                      style={{
+                        color: numColor,
+                        fontSize: 13,
+                        fontWeight: 700,
+                        letterSpacing: 0,
+                        textTransform: 'none',
+                      }}
+                    >
+                      {pw.confidence_score}%
+                    </span>
+                  </div>
+                )
+              })()}
+              <StatusPill status={pkg.status} />
+            </div>
           </div>
 
           <div className="detail-meta-grid">
@@ -1105,15 +1299,9 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
             </div>
           </div>
 
-          {/* Confidence score */}
-          {pw?.confidence_score && (
-            <div style={{ padding: '12px 0', borderTop: '1px solid #2D3748', marginTop: '12px' }}>
-              <div className={`rmp-conf-cell ${confidenceTone(pw.confidence_score)}`}>
-                <span style={{ fontSize: 11, color: '#64748B', marginRight: 8 }}>Confidence</span>
-                <span className="rmp-conf-num">{pw.confidence_score}%</span>
-              </div>
-            </div>
-          )}
+          {/* Confidence score — now lives in the drawer header row (next to
+              StatusPill), so the standalone bottom block is no longer needed.
+              Kept the ref here as a sentinel in case we want to bring it back. */}
 
           {/* HITL v2 — Post-fix review panel. Only shown when the package
               is awaiting_review. Two flavors:
@@ -1279,8 +1467,42 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                       {ticketLoading ? 'Creating…' : 'Create Ticket'}
                     </button>
                   )
-                ) : (
+                ) : effectiveStatus === 'rejected' ? (
                   <span style={{ flex: 1, textAlign: 'center', color: '#e2876f', fontWeight: 600 }}>✗ Rejected</span>
+                ) : (
+                  // All other terminal states (fixed / rolled_back / fix_failed /
+                  // review_rejected / approved / no_fix_needed): show a status
+                  // chip in place of the buttons — nothing to decide.
+                  // Confidence lives in the drawer header row (not here).
+                  <span
+                    style={{
+                      flex: 1,
+                      textAlign: 'center',
+                      color:
+                        effectiveStatus === 'fixed'
+                          ? '#7dc078'
+                          : effectiveStatus === 'rolled_back' || effectiveStatus === 'review_rejected'
+                            ? '#e2876f'
+                            : effectiveStatus === 'fix_failed'
+                              ? '#d17878'
+                              : '#94a3b8',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {effectiveStatus === 'fixed'
+                      ? '✓ Fixed'
+                      : effectiveStatus === 'rolled_back'
+                        ? '↶ Rolled Back'
+                        : effectiveStatus === 'fix_failed'
+                          ? '✗ Fix Failed'
+                          : effectiveStatus === 'review_rejected'
+                            ? '✗ Review Rejected'
+                            : effectiveStatus === 'no_fix_needed'
+                              ? '— No Fix Needed'
+                              : effectiveStatus === 'approved'
+                                ? '✓ Approved'
+                                : effectiveStatus}
+                  </span>
                 )}
               </>
             ) : (

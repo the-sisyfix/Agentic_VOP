@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # start (fails fast rather than silently attempt fixes with no target).
     fixer_env2_instance_id: str = ""
 
+    # Terraform `name_prefix` of the remediation playground that
+    # FIXER_ENV2_INSTANCE_ID points at (infra/vuln-labs/<env>/main.tf).
+    # Used by /admin/env2/reset-serverless to render the serverless-lab
+    # template with the right resource names. The CSPM reset does NOT need
+    # it (it reads the state key from backend.hcl on the box).
+    #   PROD (env2): vop-vuln-lab-env2   (default)
+    #   DEV  (env3): FIXER_LAB_NAME_PREFIX=vop-vuln-lab-env3
+    fixer_lab_name_prefix: str = "vop-vuln-lab-env2"
+
     # Path prefix to prepend to raw-finding absolute paths so they resolve to
     # env2's real filesystem layout. Example:
     #   Raw finding says:  /main.tf         (relative to Checkov's scan root)
@@ -91,6 +100,17 @@ class Settings(BaseSettings):
     # AWS region for env2 + SSM RunCommand calls.
     aws_region: str = "us-east-1"
 
+    # --- Image Hardening (separate feature; see app/services/image_hardening) ---
+    # Core runtime config for the hardening pipeline. These are permanent
+    # production settings (not test-only) — only the VALUES change per
+    # environment. The registry can also be overridden per-request via the
+    # trigger's target_registry (orchestrator._with_defaults); the setting is
+    # the fallback/default. The build-instance id is the MVP/fallback path and
+    # coexists with the future ephemeral-box seam (resolve_build_instance).
+    hardening_build_instance_id: str = ""  # dedicated build EC2 (SSM-managed)
+    hardening_ecr_repository_url: str = ""  # ECR repo URL (push target, no tag)
+    hardening_sbom_bucket: str = ""  # S3 bucket for SBOM artifacts
+
     # --- HITL v2 Git-native review (Phase B, side experiment) ------------
     # All optional. When any of these are empty, the git-review flow is
     # simply unavailable — existing HITL v1 + sandbox review + auto-demo
@@ -102,6 +122,21 @@ class Settings(BaseSettings):
     github_pat: str = ""
     github_repo: str = ""
     github_base_branch: str = "main"
+
+    # --- GitHub App auth for image-hardening auto-sign dispatch -----------
+    # Preferred over github_pat for programmatically dispatching the signing
+    # workflow (short-lived installation tokens, no long-lived PAT). All
+    # optional: when any is empty, auto-dispatch falls back to github_pat, and
+    # if that is also empty, signing is skipped gracefully (dispatch manually).
+    #
+    # github_app_id                      — the App's numeric id
+    # github_app_installation_id         — the installation id on the target repo
+    # github_app_private_key_secret_arn  — AWS Secrets Manager ARN/name holding
+    #   the App private key (.pem). The KEY VALUE is never in env/config — only
+    #   this reference; the backend fetches it from Secrets Manager at dispatch.
+    github_app_id: str = ""
+    github_app_installation_id: str = ""
+    github_app_private_key_secret_arn: str = ""
 
     # --- Secrets encryption ---
     # Base64-encoded 32-byte key for AES-256-GCM encryption of sensitive
@@ -177,7 +212,61 @@ class Settings(BaseSettings):
     # (production behavior). Set to "dev" in your local .env to route all
     # reads/writes to the isolated dev schema — zero agent code changes needed.
     # The "demo" pipeline is unaffected (supabase_admin_demo() stays hardcoded).
+    #
+    # NOTE: db_schema is NOT the dev/prod data boundary. The real isolation
+    # boundary is the Supabase PROJECT (app_env + a dedicated dev project).
+    # See app_env below.
     db_schema: str = "public"
+
+    # --- Environment identity + PROD data-isolation guard ---
+    # app_env names the environment the app is running in:
+    #   "dev"  — local development (default). MUST point at the dev Supabase
+    #            project, never the PROD project.
+    #   "prod" — the deployed EC2 app. Set via SSM parameter
+    #            /sisyfix/prod/app/APP_ENV=prod, which the deploy workflow
+    #            writes into /opt/app/.env on every deploy.
+    #
+    # Default is "dev" so a fresh local checkout is protected by default: if a
+    # developer's .env still points at the PROD Supabase project, the guard
+    # below refuses to start and tells them to use the dev project.
+    #
+    # The guard is a no-op when app_env == "prod" — so PROD (which sets
+    # APP_ENV=prod in SSM) is completely unaffected and keeps using the PROD
+    # Supabase project exactly as before.
+    app_env: str = "dev"
+
+    # The PROD Supabase project ref the guard protects. When app_env != "prod"
+    # and AGENTIC_VOP_SUPABASE_URL contains this ref, startup hard-fails. Kept
+    # configurable (not hardcoded in logic) so it can be changed without a code
+    # edit if the PROD project ever moves.
+    prod_supabase_url_ref: str = "wkbymeovkopfufiaiwxm"
+
+    def _assert_not_pointing_at_prod_db(self) -> None:
+        """Refuse to start a non-prod app that is configured against the PROD
+        Supabase project.
+
+        Fail-safe by design: this only ever BLOCKS a misconfiguration (a dev/
+        local environment accidentally pointed at the PROD database). It never
+        alters a correctly configured environment. When app_env == "prod" it
+        does nothing, so the deployed EC2 app is unaffected.
+        """
+        if self.app_env.strip().lower() == "prod":
+            return
+        ref = (self.prod_supabase_url_ref or "").strip()
+        if not ref:
+            return
+        if ref in (self.agentic_vop_supabase_url or ""):
+            raise RuntimeError(
+                "Refusing to start: APP_ENV="
+                f"{self.app_env!r} (non-prod) but AGENTIC_VOP_SUPABASE_URL "
+                f"points at the PROD Supabase project ({ref!r}). Local/dev work "
+                "must use the dedicated dev Supabase project so it can never "
+                "read or write PROD data. Fix: set AGENTIC_VOP_SUPABASE_URL + "
+                "AGENTIC_VOP_SUPABASE_SERVICE_KEY to the dev project in your "
+                ".env. If this IS the production app, set APP_ENV=prod (in SSM: "
+                "/sisyfix/prod/app/APP_ENV=prod)."
+            )
 
 
 settings = Settings()
+settings._assert_not_pointing_at_prod_db()

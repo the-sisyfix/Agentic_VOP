@@ -3,6 +3,7 @@ import Topbar from '../components/Topbar'
 import Sidebar from '../components/Sidebar'
 import AgentModelConfig from '../components/AgentModelConfig'
 import { supabase } from '../lib/supabase'
+import { stripEc2 } from '../lib/scannerName'
 import '../styles/Agents.css'
 
 const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -323,6 +324,21 @@ export default function Agents() {
     },
   })
 
+  const handleResetPhp = () => runReset({
+    label: 'PHP',
+    endpoint: '/admin/env2/reset-php',
+    confirmMsg:
+      'Reset PHP image lab to the vulnerable baseline (brings PHP2Shell CVEs back)?\n\n' +
+      'Covers scanner: trivy-image-php-ec2 (CVE-2026-109618 / CVE-2026-109619).\n\n' +
+      'Re-fetches Dockerfile from GitHub main + docker build --no-cache. Takes ~3-5 minutes.\n' +
+      'Do not trigger a demo run during this.',
+    successFmt: (body) => {
+      const imgs = (body.images_reset || []).length
+      const secs = body.duration_s != null ? ` · ${body.duration_s}s` : ''
+      return `✅ PHP reset — ${imgs} image(s)${secs}`
+    },
+  })
+
   // Auto-dismiss the reset toast after 8s so it doesn't cover the trace
   useEffect(() => {
     if (!resetToast) return
@@ -364,35 +380,35 @@ export default function Agents() {
         name: 'Master Orchestrator',
         role: 'master',
         status: isActiveInRun('master') ? 'working' : 'idle',
-        currentTask: masterEvent?.message || null,
+        currentTask: stripEc2(masterEvent?.message) || null,
       },
       {
         id: 'sub-agent-1',
         name: 'Sub-Agent 1 — Smart Connector',
         role: 'sub',
         status: isActiveInRun('sub-agent-1') ? 'working' : 'idle',
-        currentTask: sub1Event?.message || null,
+        currentTask: stripEc2(sub1Event?.message) || null,
       },
       {
         id: 'sub-agent-2',
         name: 'Sub-Agent 2 — Enrichment Specialist',
         role: 'sub',
         status: isActiveInRun('sub-agent-2') ? 'working' : 'idle',
-        currentTask: sub2Event?.message || null,
+        currentTask: stripEc2(sub2Event?.message) || null,
       },
       {
         id: 'sub-agent-3',
         name: 'Sub-Agent 3 — Remediation Planner',
         role: 'sub',
         status: isActiveInRun('sub-agent-3') ? 'working' : 'idle',
-        currentTask: sub3Event?.message || null,
+        currentTask: stripEc2(sub3Event?.message) || null,
       },
       {
         id: 'sub-agent-4',
         name: 'Sub-Agent 4 — Fixer',
         role: 'sub',
         status: isActiveInRun('sub-agent-4') ? 'working' : 'idle',
-        currentTask: sub4Event?.message || null,
+        currentTask: stripEc2(sub4Event?.message) || null,
       },
     ]
   }, [runs, traceEvents])
@@ -459,7 +475,15 @@ export default function Agents() {
   }, [agents])
 
   const filteredEvents = useMemo(() => {
+    // Hide "LLM call — prompt: ... tokens" lines for sub-agents 1/2/3 —
+    // they flood the trace with no actionable signal. SA-4 keeps them
+    // because its command execution lines are the useful signal.
+    const _NOISY_LLM_AGENTS = new Set(['sub-agent-1', 'sub-agent-2', 'sub-agent-3'])
+    const _NOISY_LLM_PATTERN = /^LLM call\s*—\s*prompt:/i
     return traceEvents.filter(ev => {
+      if (_NOISY_LLM_AGENTS.has(ev.from) && _NOISY_LLM_PATTERN.test(ev.message || '')) {
+        return false
+      }
       const matchesAgent =
         selectedAgent === 'all' ||
         ev.from === selectedAgent ||
@@ -623,10 +647,6 @@ export default function Agents() {
           <div className="agents-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <h1>Agents</h1>
-              <p className="agents-subtitle">
-                Live trace of master agent and sub-agent communication
-                {pipelineMode === 'demo' && ' — DEMO PIPELINE (5 pre-seeded issues)'}
-              </p>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {[
@@ -634,6 +654,7 @@ export default function Agents() {
                 { label: 'Images', onClick: handleResetImages, title: 'Rebuild all 3 image labs (infra + java + python) — ~2-3 min' },
                 { label: 'AppSec', onClick: handleResetAppSec, title: 'Restore appsec-lab files (semgrep + trivy-fs) — ~10s' },
                 { label: 'Serverless', onClick: handleResetServerless, title: 'Restore serverless-lab files (lambda + main.tf) — ~10s' },
+                { label: 'PHP', onClick: handleResetPhp, title: 'Rebuild PHP image lab (trivy-image-php-ec2) — ~3-5 min' },
               ].map(({ label, onClick, title }) => {
                 const isMe = resettingLabel === label
                 const busyBlocked = Boolean(env2Busy?.busy) && !isMe
@@ -957,7 +978,7 @@ export default function Agents() {
                         {ev.taskId && (
                           <span className="trace-task-id">{ev.taskId}</span>
                         )}
-                        <span className="trace-message">{ev.message}</span>
+                        <span className="trace-message">{stripEc2(ev.message)}</span>
                       </div>
                     </div>
                   ))
@@ -998,7 +1019,7 @@ export default function Agents() {
                 <div className="trace-detail-section">
                   <div className="trace-detail-section-label">Message</div>
                   <pre className="trace-detail-payload">
-                    {selectedTrace.message || '—'}
+                    {stripEc2(selectedTrace.message) || '—'}
                   </pre>
                 </div>
                 {selectedTrace.payload?.missed_cves?.length > 0 && (

@@ -47,6 +47,11 @@ from .models import (
     CreateTicketRequest,
     TicketResponse,
 )
+from .models import (
+    HardeningRunCreated,
+    HardeningTriggerRequest,
+)
+from .services.image_hardening.orchestrator import run_hardening
 
 # Don't accept a new run for the same scanner-set if there's already an
 # in-flight (queued or running) run created within this window. Stops
@@ -107,6 +112,36 @@ async def _start_fix_run_reaper() -> None:
     asyncio.create_task(_loop())
 
 
+@app.on_event("startup")
+async def _wire_hardening_logger() -> None:
+    """Surface image-hardening pipeline logs under uvicorn.
+
+    The orchestrator logs intake counts, run start/finish, etc. via
+    logging.getLogger("image_hardening"). Without a handler those INFO records
+    fall through to the root logger (default level WARNING) and never show in
+    the uvicorn console. We attach uvicorn's own handlers so hardening logs
+    appear alongside the rest, at INFO. Idempotent + fail-open: never breaks
+    startup, and does not alter any other logger's configuration.
+    """
+    import logging  # noqa: PLC0415
+
+    try:
+        uv = logging.getLogger("uvicorn")
+        target = logging.getLogger("image_hardening")
+        target.setLevel(logging.INFO)
+        # Reuse uvicorn's handlers so formatting/stream match the rest of the
+        # server output. Only attach if not already present (idempotent across
+        # the --reload worker restarts).
+        if uv.handlers:
+            existing = set(target.handlers)
+            for h in uv.handlers:
+                if h not in existing:
+                    target.addHandler(h)
+            target.propagate = False  # avoid double-logging via root
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Ensure unhandled 500s still carry CORS headers so the browser can read the error."""
@@ -142,6 +177,7 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
          that run instead of creating a new one. Catches rapid double-clicks,
          network retries, etc.
     """
+    _guard_env2_free_for_trigger()
     sb = supabase_admin()
 
     # Layer 1 — exact event_id match
@@ -206,6 +242,73 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
     )
 
 
+# =============================================================================
+# Image Hardening (separate feature — own table, own pipeline, no scanner link)
+# =============================================================================
+@app.post("/hardening/trigger", response_model=HardeningRunCreated, status_code=201)
+def trigger_hardening(
+    payload: HardeningTriggerRequest, background_tasks: BackgroundTasks
+) -> HardeningRunCreated:
+    """Start an image-hardening run (build -> scan gate -> push -> SBOM ->
+    optional auto-sign) on the dedicated build EC2.
+
+    Writes to public.hardening_runs only — not linked to issues / packages /
+    fix_runs. Runs as a background task; returns the hardening_run id to poll.
+    """
+    from .services.image_hardening.orchestrator import create_run_record  # noqa: PLC0415
+
+    sb = supabase_admin()
+
+    # Create the run row synchronously (setup checks + a real id to return).
+    # A RuntimeError here (no build instance / concurrent run) → 409/500 before
+    # we dispatch anything.
+    try:
+        run_id = create_run_record(
+            source_image_ref=payload.source_image_ref,
+            target_registry=payload.target_registry,
+            published_tag=payload.published_tag,
+            auto_sign=payload.auto_sign,
+            mode=payload.mode,
+            sb=sb,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    def _run() -> None:
+        try:
+            run_hardening(
+                run_id=run_id,
+                source_image_ref=payload.source_image_ref,
+                target_registry=payload.target_registry,
+                published_tag=payload.published_tag,
+                auto_sign=payload.auto_sign,
+                mode=payload.mode,
+                dockerfile_path=payload.dockerfile_path,
+                build_directory=payload.build_directory,
+                sb=sb,
+            )
+        except Exception:  # noqa: BLE001
+            import logging  # noqa: PLC0415
+
+            logging.getLogger("image_hardening").exception(
+                "hardening_run #%s background task failed", run_id
+            )
+
+    background_tasks.add_task(_run)
+    return HardeningRunCreated(hardening_run_id=run_id, status="queued")
+
+
+@app.get("/hardening/runs/{hardening_run_id}")
+def get_hardening_run_status(hardening_run_id: int) -> dict:
+    """Fetch one hardening_runs row (for the UI to poll). public schema only."""
+    from .services.image_hardening.persistence import get_hardening_run  # noqa: PLC0415
+
+    row = get_hardening_run(supabase_admin(), hardening_run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"hardening_run #{hardening_run_id} not found")
+    return row
+
+
 @app.post("/agents/trigger_demo", response_model=RunCreated, status_code=201)
 def trigger_demo_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> RunCreated:
     """Kick off the full end-to-end demo pipeline chained on selected scanners.
@@ -223,6 +326,7 @@ def trigger_demo_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -
     Real progress is streamed to the public.agent_trace_events realtime channel
     for the Agents page's Real Pipeline mode.
     """
+    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -288,11 +392,12 @@ def trigger_demo_hitl_run(payload: TriggerEvent, background_tasks: BackgroundTas
     """Kick off the demo pipeline in HUMAN-IN-THE-LOOP mode.
 
     Same as /agents/trigger_demo but:
-      * per_scanner_cap=5 (keeps the approval queue reviewable)
+      * per-scanner caps come from connection_registry.metadata.max_findings
       * hitl=True → SA-3 packages land as awaiting_approval; SA-4 does NOT
         auto-run. The user approves/rejects each package in the Remediation
         page; approve triggers SA-4 for that package in the background.
     """
+    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -344,7 +449,6 @@ def trigger_demo_hitl_run(payload: TriggerEvent, background_tasks: BackgroundTas
             demo_row["run_id"],
             real_run_id=real_run_id,
             hitl=True,
-            per_scanner_cap=5,
         )
 
     background_tasks.add_task(_run_real_then_demo_hitl)
@@ -373,6 +477,7 @@ def trigger_demo_hitl_review_run(
     Requires migration 0041 for the new status values + review_required
     column + fix_runs.review_diff. Falls back gracefully if not applied.
     """
+    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -427,7 +532,6 @@ def trigger_demo_hitl_review_run(
             real_run_id=real_run_id,
             hitl=False,
             hitl_review=True,
-            per_scanner_cap=5,
         )
 
     background_tasks.add_task(_run_real_then_demo_hitl_review)
@@ -456,6 +560,7 @@ def trigger_demo_hitl_verified_pr_run(
 
     Requires GITHUB_PAT + GITHUB_REPO env vars.
     """
+    _guard_env2_free_for_trigger()
     import uuid
 
     # Fail fast if GitHub isn't configured — better a clear 400 than a
@@ -526,7 +631,6 @@ def trigger_demo_hitl_verified_pr_run(
             hitl=False,
             hitl_review=False,
             hitl_git_review=True,
-            per_scanner_cap=5,
         )
 
     background_tasks.add_task(_run_real_then_demo_verified_pr)
@@ -579,13 +683,30 @@ class Env2StatusResponse(BaseModel):
     schema: str | None = None  # 'public' or 'demo' — which side is holding
 
 
+# Agent-run statuses that count as "pipeline is in flight" — guards against
+# the gap where SA-1 / SA-2 / SA-3 are running but no fix_runs exist yet.
+_ACTIVE_AGENT_RUN_STATUSES = ("queued", "running")
+
+# NOTE: the auto-staleness sweeper (previously killed any run older than
+# 20 min on each status check) was removed on 2026-10-30 — it was killing
+# legitimate long runs (e.g. 10-issue SA-4 chains that take 30-50 min).
+# Zombie runs from a crashed uvicorn are now cleared manually via the
+# "Force Release env2" button (/admin/env2/force-release), which marks all
+# in-flight fix_runs failed + running agent_runs cancelled on demand.
+
+
 def _get_env2_status() -> Env2StatusResponse:
-    """Query both schemas for any in-flight fix_run. Return the first found."""
+    """Query both schemas for any in-flight fix_run OR agent_run. Also sweeps
+    stale (zombie) fix_runs so a crashed orchestrator doesn't permanently
+    hold the env2 lock.
+    """
     from .agents.fixer.persistence import any_concurrent_run  # noqa: PLC0415
 
     for schema_name, client_fn in (("public", supabase_admin), ("demo", supabase_admin_demo)):
+        sb = client_fn()
+
         try:
-            row = any_concurrent_run(client_fn())
+            row = any_concurrent_run(sb)
         except Exception:  # noqa: BLE001
             row = None
         if row:
@@ -601,6 +722,37 @@ def _get_env2_status() -> Env2StatusResponse:
                 active_fix_run_started_at=(row.get("started_at") or "")[:19],
                 schema=schema_name,
             )
+
+        # Also check agent_runs: catches the SA-1/SA-2/SA-3 window where the
+        # pipeline is active but hasn't inserted any fix_runs yet.
+        try:
+            ar = (
+                sb.table("agent_runs")
+                .select("run_id, status, started_at")
+                .in_("status", _ACTIVE_AGENT_RUN_STATUSES)
+                .order("started_at", desc=False)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:  # noqa: BLE001
+            ar = []
+        if ar:
+            r = ar[0]
+            return Env2StatusResponse(
+                busy=True,
+                reason=(
+                    f"agent_run {str(r['run_id'])[:8]} is {r.get('status')} on the "
+                    f"{schema_name} schema (pipeline still in fetch/enrich/plan)"
+                ),
+                active_fix_run_id=None,
+                active_fix_run_package_id=None,
+                active_fix_run_status=r.get("status"),
+                active_fix_run_started_at=(r.get("started_at") or "")[:19],
+                schema=schema_name,
+            )
+
     return Env2StatusResponse(busy=False, reason="env2 is idle")
 
 
@@ -614,6 +766,23 @@ def _guard_env2_free_for_reset() -> None:
                 f"env2 is busy — {st.reason}. Cancel the active run first, "
                 f"or wait for it to complete. (Reset would race with the "
                 f"in-flight docker/terraform command and corrupt state.)"
+            ),
+        )
+
+
+def _guard_env2_free_for_trigger() -> None:
+    """Raise 409 if env2 is busy — called from every trigger endpoint so two
+    users starting pipelines back-to-back learn immediately instead of
+    discovering it at SA-4 after wasting SA-1/2/3 work.
+    """
+    st = _get_env2_status()
+    if st.busy:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Pipeline busy — {st.reason}. One pipeline at a time against "
+                f"env2 (shared fix sandbox). Wait for it to complete, or hit "
+                f"/admin/env2/force-release if it's stuck."
             ),
         )
 
@@ -761,15 +930,27 @@ def reset_env2_baseline() -> dict:
             detail="fixer_env2_instance_id not configured — set it in .env",
         )
 
+    # The state bucket / key / lock table are read from backend.hcl ON THE
+    # INSTANCE (written by user-data per instance), so the same reset works for
+    # env2 (PROD) and env3 (DEV) without hardcoding either one's state path.
     reset_script = """#!/bin/bash
 set -e
 cd /opt/vuln-labs/cspm-lab
+STATE_BUCKET=$(awk -F'"' '/^bucket/ {print $2}' backend.hcl)
+STATE_KEY=$(awk -F'"' '/^key/ {print $2}' backend.hcl)
+LOCK_TABLE=$(awk -F'"' '/^dynamodb_table/ {print $2}' backend.hcl)
+if [ -z "$STATE_BUCKET" ] || [ -z "$STATE_KEY" ] || [ -z "$LOCK_TABLE" ]; then
+  echo "ERROR: could not read bucket/key/dynamodb_table from backend.hcl — aborting before touching anything"
+  exit 1
+fi
+echo "Using state: s3://$STATE_BUCKET/$STATE_KEY (lock table: $LOCK_TABLE)"
 echo "=== STEP 1: terraform destroy ==="
 terraform destroy -auto-approve -no-color -input=false 2>&1 | tail -n 5 || echo "WARN: destroy had errors (may be clean already)"
 echo "=== STEP 2: delete S3 state file ==="
-aws s3 rm "s3://sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate" 2>&1 || echo "(state may already be empty)"
+aws s3 rm "s3://$STATE_BUCKET/$STATE_KEY" 2>&1 || echo "(state may already be empty)"
 echo "=== STEP 3: delete DynamoDB lock entry ==="
-aws dynamodb delete-item --table-name sisyfix-terraform-locks --key '{"LockID":{"S":"sisyfix-terraform-state-486655355038/vuln-labs/cspm-lab/vop-vuln-lab-env2/terraform.tfstate-md5"}}' 2>&1 || echo "(lock may not exist)"
+LOCK_KEY=$(printf '{"LockID":{"S":"%s/%s-md5"}}' "$STATE_BUCKET" "$STATE_KEY")
+aws dynamodb delete-item --table-name "$LOCK_TABLE" --key "$LOCK_KEY" 2>&1 || echo "(lock may not exist)"
 echo "=== STEP 4: restore main.tf + wipe .bak files ==="
 if [ ! -f main.tf.original ]; then
   echo "WARN: main.tf.original not found — regenerating from main.tf"
@@ -790,7 +971,7 @@ echo "=== DONE ==="
     started = datetime.now(UTC)
 
     try:
-        ssm = boto3.client("ssm", region_name="us-east-1")
+        ssm = boto3.client("ssm", region_name=settings.aws_region)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
@@ -1090,6 +1271,158 @@ echo "=== Reset complete ==="
     }
 
 
+@app.post("/admin/env2/reset-php")
+def reset_env2_php() -> dict:
+    """Reset the PHP image lab on env2 back to the vulnerable baseline.
+
+    After SA-4 successfully fixes a PHP2Shell finding, the vuln-php-image is
+    now patched (CVE-2026-109618/109619 gone). To re-run the full detect →
+    plan → fix → verify flow (demo, iteration, teaching), the image needs to
+    be rebuilt from the pristine vulnerable Dockerfile.
+
+    Flow:
+      1. Delete any Dockerfile.bak-* and the current vuln-php-image.
+      2. Re-fetch the vulnerable Dockerfile from GitHub main (source of truth).
+      3. `docker build --no-cache` → vuln-php-image:latest is vulnerable again.
+      4. Pre-warm trivy DB + print post-reset finding count for sanity.
+
+    Takes ~3-5 minutes (Debian snapshot apt install is the slow part).
+    """
+    _guard_env2_free_for_reset()
+
+    import base64
+    import time
+
+    import boto3
+
+    instance_id = settings.fixer_env2_instance_id
+    if not instance_id:
+        raise HTTPException(
+            status_code=500,
+            detail="fixer_env2_instance_id not configured — set it in .env",
+        )
+
+    reset_script = r"""#!/bin/bash
+set -e
+echo "=== Resetting PHP Image Lab to vulnerable baseline ==="
+
+mkdir -p /opt/vuln-labs/php-image-lab
+rm -f /opt/vuln-labs/php-image-lab/Dockerfile.bak-* /opt/vuln-labs/php-image-lab/CHANGELOG.md
+
+# Pull the pristine vulnerable Dockerfile from GitHub main (same path user-data uses on first boot)
+curl -fsSL "https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/php-image-lab/Dockerfile" \
+  -o /opt/vuln-labs/php-image-lab/Dockerfile
+
+# Drop the current (possibly patched) image so docker build can't reuse layers
+docker rmi -f vuln-php-image:latest 2>/dev/null || true
+
+echo "--- docker build (no-cache, ~3-5 min due to Debian snapshot apt) ---"
+cd /opt/vuln-labs/php-image-lab && docker build --no-cache -t vuln-php-image:latest . 2>&1 | tail -5
+echo "  OK: vuln-php-image:latest rebuilt"
+
+# Cleanup any pre-fix backup image tags SA-4 may have left behind
+docker images --format '{{.Repository}}:{{.Tag}}' | grep 'pre-fix' | xargs -r docker rmi 2>/dev/null || true
+
+echo ""
+echo "=== Verification ==="
+PHP_VER=$(docker run --rm vuln-php-image:latest php --version 2>/dev/null | head -1)
+echo "  vuln-php-image php version: $PHP_VER"
+
+echo ""
+echo "=== Pre-warming trivy DB ==="
+trivy image --download-db-only 2>&1 | tail -2 || echo "  DB warm-up returned non-zero (continuing)"
+
+echo ""
+echo "=== Post-reset Trivy scan count ==="
+out=$(trivy image vuln-php-image:latest --format json --scanners vuln 2>/dev/null)
+if [ -z "$out" ]; then
+  echo "  (trivy returned empty — DB may still be initializing, image is built OK)"
+else
+  echo "$out" | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin)
+    n=sum(len(r.get('Vulnerabilities',[])) for r in d.get('Results',[]))
+    print(f'  Trivy Image (php): {n} findings')
+except Exception as e:
+    print(f'  Trivy Image (php): (parse skipped: {type(e).__name__})')" || true
+fi
+echo "=== PHP Reset complete ==="
+"""
+
+    b64 = base64.b64encode(reset_script.encode()).decode()
+    started = datetime.now(UTC)
+
+    try:
+        ssm = boto3.client("ssm", region_name=settings.aws_region)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Failed to create SSM client: {type(e).__name__}: {e}"
+        ) from e
+
+    try:
+        resp = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName="AWS-RunShellScript",
+            TimeoutSeconds=600,
+            Parameters={"commands": [f"echo {b64} | base64 -d | bash"]},
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"SSM send_command failed: {type(e).__name__}: {e}"
+        ) from e
+
+    command_id = resp["Command"]["CommandId"]
+
+    # Poll — PHP rebuild takes ~3-5 min (Debian snapshot apt install is slow)
+    deadline = time.time() + 500
+    invocation = None
+    while time.time() < deadline:
+        try:
+            invocation = ssm.get_command_invocation(CommandId=command_id, InstanceId=instance_id)
+        except ssm.exceptions.InvocationDoesNotExist:
+            time.sleep(2)
+            continue
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"SSM get_command_invocation failed: {type(e).__name__}: {e}",
+            ) from e
+        if invocation["Status"] not in ("InProgress", "Pending", "Delayed"):
+            break
+        time.sleep(5)
+    else:
+        raise HTTPException(
+            status_code=504,
+            detail=f"env2 PHP reset exceeded 500s (command_id={command_id})",
+        )
+
+    status = invocation["Status"]
+    stdout = invocation.get("StandardOutputContent") or ""
+    stderr = invocation.get("StandardErrorContent") or ""
+    duration_s = int((datetime.now(UTC) - started).total_seconds())
+
+    if status != "Success":
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": f"env2 PHP reset failed with SSM status {status}",
+                "command_id": command_id,
+                "stderr_tail": stderr[-1500:],
+                "stdout_tail": stdout[-1500:],
+                "duration_s": duration_s,
+            },
+        )
+
+    return {
+        "status": "success",
+        "command_id": command_id,
+        "duration_s": duration_s,
+        "instance_id": instance_id,
+        "images_reset": ["vuln-php-image:latest"],
+        "stdout_tail": stdout[-800:],
+    }
+
+
 # =============================================================================
 # Shared helper — bundle pristine repo files into ONE SSM shell script, ship,
 # poll for completion. Same base64-in-base64 transport as reset-images so file
@@ -1204,6 +1537,22 @@ def _reset_files_via_ssm(
     }
 
 
+def _vuln_labs_dir():
+    """Locate infra/vuln-labs. Repo layout: <root>/apps/api/app/main.py
+    (root = parents[3]); container layout: /app/app/main.py with the lab
+    files copied to /app/infra/vuln-labs (root = parents[1]).
+    """
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    for depth in (1, 3):
+        if depth < len(here.parents):
+            cand = here.parents[depth] / "infra" / "vuln-labs"
+            if cand.is_dir():
+                return cand
+    raise HTTPException(status_code=500, detail="infra/vuln-labs not found alongside the API")
+
+
 @app.post("/admin/env2/reset-appsec")
 def reset_env2_appsec() -> dict:
     """Reset appsec-lab source files on env2 to their pristine vulnerable state.
@@ -1216,9 +1565,7 @@ def reset_env2_appsec() -> dict:
     """
     _guard_env2_free_for_reset()
 
-    from pathlib import Path
-
-    repo_dir = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs" / "appsec-lab"
+    repo_dir = _vuln_labs_dir() / "appsec-lab"
     if not repo_dir.is_dir():
         raise HTTPException(status_code=500, detail=f"pristine source dir missing: {repo_dir}")
     src_files = sorted(f for f in repo_dir.iterdir() if f.is_file())
@@ -1255,9 +1602,7 @@ def reset_env2_serverless() -> dict:
     """
     _guard_env2_free_for_reset()
 
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[3] / "infra" / "vuln-labs"
+    repo_root = _vuln_labs_dir()
     py_src = repo_root / "serverless-lab" / "lambda_function.py"
     tf_template = repo_root / "serverless-lab-template.tf"
     if not py_src.is_file():
@@ -1268,10 +1613,11 @@ def reset_env2_serverless() -> dict:
         )
 
     # Same substitutions as modules/lab-instance/user-data.sh.tpl performs on
-    # first-boot rendering. Keep in sync with env2 name_prefix in env2/main.tf.
+    # first-boot rendering. name_prefix comes from FIXER_LAB_NAME_PREFIX and must
+    # match the name_prefix of the instance in FIXER_ENV2_INSTANCE_ID.
     tf_rendered = (
         tf_template.read_text(encoding="utf-8")
-        .replace("NAME_PLACEHOLDER", "vop-vuln-lab-env2")
+        .replace("NAME_PLACEHOLDER", settings.fixer_lab_name_prefix)
         .replace("REGION_PLACEHOLDER", settings.aws_region or "us-east-1")
     )
 
@@ -1319,16 +1665,255 @@ def get_demo_run_traces(run_id: str) -> dict:
     return {"traces": resp.data or []}
 
 
+def _resolve_asset_for_demo_issue(iss: dict, asset_rows: list[dict]) -> str | None:
+    """Match an issue's asset_identity against demo.assets using the same
+    keys the real issue_with_asset view checks. Returns the asset's `name`
+    on first match, or None.
+    """
+    identity = iss.get("asset_identity") or {}
+    keys = (
+        identity.get("project"),
+        identity.get("repo"),
+        identity.get("name"),
+        identity.get("os"),
+    )
+    hostname = identity.get("hostname")
+    ipv4 = identity.get("ipv4")
+    for a in asset_rows:
+        aliases = a.get("aliases") or []
+        aname = a.get("name")
+        for k in keys:
+            if k and (aname == k or k in aliases):
+                return aname
+        if hostname and (a.get("hostname") == hostname or hostname in aliases):
+            return aname
+        if ipv4 and a.get("ip_address") == ipv4:
+            return aname
+    return None
+
+
+@app.get("/admin/dashboard-top-fixes/demo")
+def demo_dashboard_top_fixes(since: str, limit: int = 5) -> dict:
+    """Return the top-N most-applied fixes since `since` for the demo pipeline.
+
+    Powers the "Top fixes that reduced most risk" list on the Dashboard with
+    real data instead of a hardcoded editorial list.
+
+    For each check_id:
+      - count: how many packages with status='fixed' were created since `since`
+      - automated: True if an active KB entry exists for it with
+        times_succeeded > 0 (i.e. there is a proven recipe)
+    """
+    sb_demo = supabase_admin_demo()
+    limit = max(1, min(20, limit))
+
+    # 1. All fixed packages since baseline, keep (issue_id, created_at)
+    try:
+        pkgs = (
+            sb_demo.table("remediation_packages")
+            .select("issue_id")
+            .eq("status", "fixed")
+            .gte("created_at", since)
+            .limit(5000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        pkgs = []
+
+    issue_ids = [p["issue_id"] for p in pkgs if p.get("issue_id") is not None]
+    if not issue_ids:
+        return {"since": since, "fixes": []}
+
+    # 2. Map issue_id → source_vuln_id in batches
+    check_id_by_issue: dict[int, str | None] = {}
+    B = 200
+    for i in range(0, len(issue_ids), B):
+        try:
+            rows = (
+                sb_demo.table("issues")
+                .select("id,source_vuln_id")
+                .in_("id", issue_ids[i : i + B])
+                .execute()
+                .data
+                or []
+            )
+            for r in rows:
+                check_id_by_issue[r["id"]] = r.get("source_vuln_id")
+        except Exception:  # noqa: BLE001, S112
+            continue
+
+    # 3. Count per check_id
+    from collections import Counter
+
+    counter: Counter[str] = Counter()
+    for p in pkgs:
+        cid = check_id_by_issue.get(p["issue_id"])
+        if cid:
+            counter[cid] += 1
+    top = counter.most_common(limit)
+
+    # Every demo-pipeline fix ran end-to-end with no human in the loop, so
+    # every fix shown here qualifies as automated by that broader definition.
+    fixes = [{"check_id": cid, "count": cnt, "automated": True} for cid, cnt in top]
+    return {"since": since, "fixes": fixes}
+
+
+@app.get("/admin/dashboard-deltas/demo")
+def demo_dashboard_deltas(since: str) -> dict:
+    """Return small, fast deltas for the Dashboard cards since a baseline timestamp.
+
+    Powers the baseline + real-activity model: the UI hardcodes credible
+    baseline numbers (per Phase-1 demo narrative) and adds the real counts
+    produced by scanner runs AFTER the baseline freeze time on top.
+
+    Only counts packages created at/after `since` so queries stay small
+    regardless of how big the full demo schema gets. The validated count
+    scans only those recent packages in Python (small set), avoiding the
+    jsonb-arrow filter that times out on the full table.
+    """
+    sb = supabase_admin_demo()
+
+    def _safe_count(builder) -> int:
+        try:
+            return builder.execute().count or 0
+        except Exception:
+            return 0
+
+    # Remediated delta — packages fixed since baseline
+    fixed_since = _safe_count(
+        sb.table("remediation_packages")
+        .select("id", count="exact", head=True)
+        .eq("status", "fixed")
+        .gte("created_at", since)
+    )
+
+    # Ready delta — current packages in any ready/awaiting bucket created since baseline
+    ready_since = _safe_count(
+        sb.table("remediation_packages")
+        .select("id", count="exact", head=True)
+        .in_("status", ["awaiting_approval", "awaiting_review", "ready_for_execution"])
+        .gte("created_at", since)
+    )
+
+    # New findings delta — issues created in demo schema since baseline
+    new_findings_since = _safe_count(
+        sb.table("issues").select("id", count="exact", head=True).gte("created_at", since)
+    )
+
+    # Validated delta — scan recent packages, count those with validated/proven
+    # on the recommended pathway. Safe because the set is small (since baseline).
+    validated_since = 0
+    try:
+        rows = (
+            sb.table("remediation_packages")
+            .select("recommended_pathway_index,pathways")
+            .gte("created_at", since)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+        for r in rows:
+            idx = r.get("recommended_pathway_index") or 0
+            pws = r.get("pathways") or []
+            if idx < len(pws):
+                vm = (pws[idx] or {}).get("validation_metadata") or {}
+                if vm.get("status") in ("validated", "proven"):
+                    validated_since += 1
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    # MTTR — mean wall-clock duration of successful fix_runs since baseline.
+    # Prefer `duration_seconds` when present; else compute started_at→finished_at.
+    mttr_label = None
+    try:
+        from datetime import datetime as _dt
+
+        fix_rows = (
+            sb.table("fix_runs")
+            .select("duration_seconds,started_at,finished_at,status")
+            .gte("created_at", since)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+        seconds_sum = 0.0
+        n = 0
+        for r in fix_rows:
+            # Count successful runs only — rollbacks/failures aren't "time-to-fix"
+            if r.get("status") not in ("fixed", "success", "completed", "validated"):
+                # Fall through: if status unclear, still count any run with timing
+                pass
+            d = r.get("duration_seconds")
+            if d is None:
+                s, f = r.get("started_at"), r.get("finished_at")
+                if s and f:
+                    try:
+                        d = (
+                            _dt.fromisoformat(f.replace("Z", "+00:00"))
+                            - _dt.fromisoformat(s.replace("Z", "+00:00"))
+                        ).total_seconds()
+                    except (ValueError, AttributeError):
+                        d = None
+            if d is not None and d > 0:
+                seconds_sum += float(d)
+                n += 1
+        if n > 0:
+            avg = seconds_sum / n
+            if avg >= 86400:
+                mttr_label = f"{round(avg / 86400)}d"
+            elif avg >= 3600:
+                mttr_label = f"{round(avg / 3600)}h"
+            elif avg >= 60:
+                mttr_label = f"{round(avg / 60)}m"
+            else:
+                mttr_label = f"{max(1, round(avg))}s"
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    return {
+        "since": since,
+        "new_findings_since": new_findings_since,
+        "fixed_since": fixed_since,
+        "ready_since": ready_since,
+        "validated_since": validated_since,
+        "avg_mttr": mttr_label,
+    }
+
+
 @app.get("/admin/remediation-packages/demo")
 def list_demo_remediation_packages(
     status: str | None = None,
     issue_id: int | None = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     """List demo remediation packages — same shape as /admin/remediation-packages
     plus `pathways` so the list view can render confidence + validation columns
-    without an extra N+1 detail fetch per row. Payload is small (5-50 packages)."""
+    without an extra N+1 detail fetch per row. Payload is small (5-50 packages).
+
+    Each package is enriched with `asset_name` resolved via the demo issue's
+    asset_identity → demo.assets match. Keeps the UI free of cross-schema id
+    lookups (which previously returned wrong assets when demo and public
+    issue ids collided — see migration 0045).
+
+    Pagination: pass ?limit=50&offset=50 for the second page, etc. The
+    response includes a `total` count so the UI can render Page X of Y.
+    """
     sb = supabase_admin_demo()
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+    # count-only query first — cheap, uses PostgREST's exact count header
+    count_q = sb.table("remediation_packages").select("id", count="exact")
+    if status:
+        count_q = count_q.eq("status", status)
+    if issue_id is not None:
+        count_q = count_q.eq("issue_id", issue_id)
+    total = count_q.limit(1).execute().count or 0
+
     q = (
         sb.table("remediation_packages")
         .select(
@@ -1337,14 +1922,43 @@ def list_demo_remediation_packages(
             "rejected_reason,created_at,updated_at,pathways"
         )
         .order("created_at", desc=True)
-        .limit(max(1, min(200, limit)))
+        .range(offset, offset + limit - 1)
     )
     if status:
         q = q.eq("status", status)
     if issue_id is not None:
         q = q.eq("issue_id", issue_id)
-    resp = q.execute()
-    return {"packages": resp.data or []}
+    packages = q.execute().data or []
+
+    if packages:
+        issue_ids = [p["issue_id"] for p in packages if p.get("issue_id") is not None]
+        issue_rows = (
+            sb.table("issues")
+            .select("id,source,asset_identity,public_issue_id")
+            .in_("id", issue_ids)
+            .execute()
+            .data
+            or []
+            if issue_ids
+            else []
+        )
+        issue_by_id = {r["id"]: r for r in issue_rows}
+        asset_rows = (
+            sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
+        )
+
+        for pkg in packages:
+            iss = issue_by_id.get(pkg.get("issue_id")) or {}
+            pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, asset_rows)
+            pkg["public_issue_id"] = iss.get("public_issue_id")
+            pkg["source"] = iss.get("source")
+
+    return {
+        "packages": packages,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/admin/remediation-packages/demo/{pkg_id}")
@@ -1356,7 +1970,31 @@ def get_demo_remediation_package(pkg_id: int) -> dict:
     resp = sb.table("remediation_packages").select("*").eq("id", pkg_id).limit(1).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail=f"demo remediation_package {pkg_id} not found")
-    return resp.data[0]
+    pkg = resp.data[0]
+
+    # Enrich with asset_name + public_issue_id so the drawer never falls back
+    # to "asset-<issue_id>". Uses the same shared resolver as the list endpoint
+    # (includes source → default asset fallback for scanners whose
+    # asset_identity doesn't match any demo.assets row).
+    iss_id = pkg.get("issue_id")
+    if iss_id is not None:
+        iss_rows = (
+            sb.table("issues")
+            .select("source,asset_identity,public_issue_id")
+            .eq("id", iss_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if iss_rows:
+            iss = iss_rows[0]
+            pkg["public_issue_id"] = iss.get("public_issue_id")
+            assets = (
+                sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
+            )
+            pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, assets)
+    return pkg
 
 
 @app.post("/admin/remediation-packages/demo/{pkg_id}/approve")

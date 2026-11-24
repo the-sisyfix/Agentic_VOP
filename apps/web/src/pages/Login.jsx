@@ -33,7 +33,7 @@ export default function Login() {
       <div className="auth-card">
         <div className="auth-header">
           <h1>Welcome Back</h1>
-          <p className="auth-subtitle">Login to CyberRisk AI</p>
+          <p className="auth-subtitle">Login to Sisyfix</p>
         </div>
 
         <form onSubmit={handleSubmit} className="auth-form">

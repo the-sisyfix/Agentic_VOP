@@ -14,6 +14,7 @@ Endpoints:
   GET  /scan/trivy-image/infra  — returns cached Trivy image results (Ubuntu/OpenSSL)
   GET  /scan/trivy-image/java   — returns cached Trivy image results (Tomcat/JDK)
   GET  /scan/trivy-image/python — returns cached Trivy image results (Python/pip)
+  GET  /scan/trivy-image/php    — returns cached Trivy image results (Debian php8.2 OS pkgs)
   GET  /scan/trivy-os           — returns cached Trivy OS results (host rootfs)
   GET  /scan/serverless         — returns cached Semgrep serverless results (Lambda IaC + code)
   POST /trigger-scan            — re-runs all scanners and updates cache
@@ -37,6 +38,7 @@ SERVERLESS_PATH = os.environ.get(
 INFRA_IMAGE = os.environ.get("VULN_LABS_INFRA_IMAGE", "vuln-lab-image:latest")
 JAVA_IMAGE = os.environ.get("VULN_LABS_JAVA_IMAGE", "vuln-java-image:latest")
 PYTHON_IMAGE = os.environ.get("VULN_LABS_PYTHON_IMAGE", "vuln-python-image:latest")
+PHP_IMAGE = os.environ.get("VULN_LABS_PHP_IMAGE", "vuln-php-image:latest")
 RESULTS_DIR = os.environ.get("VULN_LABS_RESULTS_DIR", "/opt/vuln-labs/results/")
 
 # Track when each scan was last run
@@ -611,6 +613,53 @@ def run_trivy_image_python():
         print(f"[scan] Trivy Image Python failed: {e}")
 
 
+def run_trivy_image_php():
+    """Run Trivy image scan on the PHP image and cache results.
+
+    Reports ALL packages (OS + language) — same behavior as the Java image,
+    NOT filtered like the Python image. The PHP2Shell CVEs (CVE-2026-109618 /
+    CVE-2026-109619) live in the Debian php8.2-* OS packages, so filtering out
+    OS-level packages would discard exactly the findings this lab exists to
+    produce.
+    """
+    try:
+        result = subprocess.run(
+            ["trivy", "image", PHP_IMAGE, "--format", "json", "--scanners", "vuln"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        data = json.loads(result.stdout) if result.stdout else {}
+        findings = []
+        for target_result in data.get("Results", []):
+            for vuln in target_result.get("Vulnerabilities", []):
+                findings.append(
+                    {
+                        "vuln_id": vuln.get("VulnerabilityID"),
+                        "pkg_name": vuln.get("PkgName"),
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                        "severity": vuln.get("Severity"),
+                        "title": vuln.get("Title"),
+                        "description": vuln.get("Description"),
+                        "target": target_result.get("Target"),
+                        "type": target_result.get("Type"),
+                    }
+                )
+
+        result_data = {
+            "findings": findings,
+            "total": len(findings),
+            "scanned_at": datetime.utcnow().isoformat(),
+        }
+        with open(os.path.join(RESULTS_DIR, "trivy-image-php.json"), "w") as f:
+            json.dump(result_data, f)
+        scan_timestamps["trivy-image-php"] = datetime.utcnow().isoformat()
+        print(f"[scan] Trivy Image PHP complete: {len(findings)} findings")
+    except Exception as e:
+        print(f"[scan] Trivy Image PHP failed: {e}")
+
+
 def run_trivy_os():
     """Scan the host OS (Ubuntu 20.04) for OS-level CVEs using trivy rootfs."""
     try:
@@ -1122,6 +1171,7 @@ def run_all_scans():
     run_trivy_image()
     run_trivy_image_java()
     run_trivy_image_python()
+    run_trivy_image_php()
     run_trivy_os()
     print("[scan] All scans complete.")
 
@@ -1142,6 +1192,8 @@ class ScanHandler(BaseHTTPRequestHandler):
             self._serve_cached("trivy-image-java.json")
         elif self.path == "/scan/trivy-image/python":
             self._serve_cached("trivy-image-python.json")
+        elif self.path == "/scan/trivy-image/php":
+            self._serve_cached("trivy-image-php.json")
         elif self.path == "/scan/trivy-image":
             # Backward compatible — serves infra image results
             self._serve_cached("trivy-image.json")
@@ -1164,6 +1216,7 @@ class ScanHandler(BaseHTTPRequestHandler):
                         "/scan/trivy-image/infra",
                         "/scan/trivy-image/java",
                         "/scan/trivy-image/python",
+                        "/scan/trivy-image/php",
                         "/scan/trivy-os",
                         "/scan/serverless",
                         "/scan-status",
@@ -1211,6 +1264,10 @@ class ScanHandler(BaseHTTPRequestHandler):
             thread = threading.Thread(target=run_trivy_image_python, daemon=True)
             thread.start()
             self._respond(202, {"status": "trivy-image-python scan triggered"})
+        elif self.path == "/trigger-scan/trivy-image-php":
+            thread = threading.Thread(target=run_trivy_image_php, daemon=True)
+            thread.start()
+            self._respond(202, {"status": "trivy-image-php scan triggered"})
         elif self.path == "/trigger-scan/serverless":
             thread = threading.Thread(target=run_serverless_semgrep, daemon=True)
             thread.start()

@@ -6,6 +6,7 @@ import ColumnToggle from '../components/ColumnToggle'
 import '../styles/Issues.css'
 import SeverityFilter from '../components/SeverityFilter'
 import { useIssuesData } from '../hooks/useIssuesData'
+import { formatScannerName } from '../lib/scannerName'
 
 // Approx vertical overhead above the table body: topbar + page header +
 // filters/toolbar + pagination footer = ~360px on most layouts.
@@ -26,7 +27,7 @@ const ISSUE_COLUMNS = [
   { key: 'issue_id', label: 'Issue ID' },
   { key: 'asset_id', label: 'Asset' },
   { key: 'asset_type', label: 'Type' },
-  { key: 'cve_id', label: 'CVE' },
+  { key: 'cve_id', label: 'CVE / ID' },
   { key: 'severity', label: 'Severity' },
   { key: 'derived_risk', label: 'Derived Risk' },
   { key: 'description', label: 'Description' },
@@ -173,7 +174,7 @@ export default function Issues() {
                     {isVisible('issue_id') && <th>ISSUE ID</th>}
                     {isVisible('asset_id') && <th>ASSET</th>}
                     {isVisible('asset_type') && <th>TYPE</th>}
-                    {isVisible('cve_id') && <th>CVE</th>}
+                    {isVisible('cve_id') && <th>CVE / ID</th>}
                     {isVisible('severity') && <th>SEVERITY</th>}
                     {isVisible('derived_risk') && (
                       <th>
@@ -329,7 +330,7 @@ export default function Issues() {
                                 )}
 
                                 <div className="tooltip-source-tag">
-                                  Source: {issue.source}
+                                  Source: {formatScannerName(issue.source)}
                                 </div>
                               </div>
                             </div>
@@ -344,7 +345,7 @@ export default function Issues() {
                         )}
                         {isVisible('source') && (
                           <td>
-                            <span className="issues-source">{issue.source}</span>
+                            <span className="issues-source">{formatScannerName(issue.source)}</span>
                           </td>
                         )}
                         {isVisible('first_detected') && (
@@ -493,7 +494,7 @@ export default function Issues() {
                 </div>
                 <div className="issue-drawer-item">
                   <span className="issue-drawer-label">Source</span>
-                  <span className="issue-drawer-value">{selectedIssue.source || '—'}</span>
+                  <span className="issue-drawer-value">{formatScannerName(selectedIssue.source) || '—'}</span>
                 </div>
                 <div className="issue-drawer-item">
                   <span className="issue-drawer-label">First Detected</span>

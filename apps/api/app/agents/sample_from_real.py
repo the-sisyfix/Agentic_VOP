@@ -79,15 +79,16 @@ _PINNED_DEMO_CHECKS: list[tuple[str, str]] = [
 #
 # Each entry: source (matches issues.source exactly) → N issues to pick.
 _SOURCE_SCOOPS: dict[str, int] = {
-    "checkov-ec2": 10,  # IaC misconfigurations (env2 focus — pinned picks land first, scoop fills to 20)
-    "trivy-image-ec2": 20,  # container image OS-package CVEs (per-finding — no batching)
-    "trivy-image-java-ec2": 20,  # Java image CVEs (per-finding — no batching)
-    "trivy-image-python-ec2": 20,  # Python image CVEs (per-finding — no batching)
-    "trivy-os-ec2": 20,  # host-level OS CVEs (Ubuntu/Debian on env2)
-    "trivy-os-al2-ec2": 4,  # Amazon Linux 2 host CVEs
-    "trivy-fs-ec2": 20,  # app-level dep CVEs (DependencyStrategy)
-    "semgrep-ec2": 20,  # SAST findings (CodeEditStrategy)
-    "serverless-ec2": 20,  # Semgrep on Lambda source — full-pool run (pool ≈ 21) to stress .py + .tf mix
+    "checkov-ec2": 20,
+    "trivy-image-ec2": 20,
+    "trivy-image-java-ec2": 20,
+    "trivy-image-python-ec2": 20,
+    "trivy-image-php-ec2": 20,
+    "trivy-os-ec2": 20,
+    "trivy-os-al2-ec2": 4,
+    "trivy-fs-ec2": 20,
+    "semgrep-ec2": 20,
+    "serverless-ec2": 20,
 }
 
 # Hard cap on final sample size — trims picks after pinned + scoops + fallback.
@@ -254,6 +255,16 @@ def sample_and_copy_ec2_issues(
     def _dedup_key(iss: dict) -> tuple[str, str, str]:
         return (iss.get("source_vuln_id") or "", _resource_label(iss), _line_hint(iss))
 
+    # Count how many raw candidate issues map to each dedup key BEFORE
+    # we start skipping duplicates. Used downstream so demo.issues can
+    # record "this surviving row stands for N raw findings" and the
+    # master's counter can credit fixed/rolled_back by that count — the
+    # end-of-run summary then sums to the raw scanner count, not the
+    # post-dedup count. Migration 0046 adds the column.
+    from collections import Counter  # noqa: PLC0415 — local import keeps module-top clean
+
+    _dedup_counts: dict[tuple[str, str, str], int] = Counter(_dedup_key(iss) for iss in ec2_issues)
+
     already_picked_keys = {_dedup_key(p) for p in picks}
     by_source: dict[str, list[dict]] = {}
     for iss in ec2_issues:
@@ -348,14 +359,34 @@ def sample_and_copy_ec2_issues(
 
     # ---- 4. Copy picks into demo.issues under this run_id ----
     # Strip the primary key + timestamps so the demo sequence assigns fresh
-    # values. Everything else preserves the real issue's shape.
+    # values. public_issue_id back-references the real row so the UI /
+    # backend can resolve the asset against the public tables without
+    # relying on id collisions (migration 0045 gave demo.issues its own seq).
     to_insert: list[dict] = []
     for iss in picks:
         row = {k: v for k, v in iss.items() if k not in ("id", "created_at", "updated_at")}
         row["agent_run_id"] = run_id
+        row["public_issue_id"] = iss.get("id")
+        # How many raw scanner findings this surviving pick represents
+        # (default 1 for non-deduped rows). Migration 0046 adds the column.
+        row["raw_duplicate_count"] = int(_dedup_counts.get(_dedup_key(iss), 1))
         to_insert.append(row)
 
-    inserted = sb_demo.table("issues").insert(to_insert).execute()
+    def _retry_without(cols: list[str]) -> list[dict]:
+        for row in to_insert:
+            for c in cols:
+                row.pop(c, None)
+        return to_insert
+
+    try:
+        inserted = sb_demo.table("issues").insert(to_insert).execute()
+    except Exception as e:  # noqa: BLE001
+        # Degrade gracefully for schemas that pre-date either migration.
+        err = str(e)
+        missing = [c for c in ("public_issue_id", "raw_duplicate_count") if c in err]
+        if not missing:
+            raise
+        inserted = sb_demo.table("issues").insert(_retry_without(missing)).execute()
     inserted_count = len(inserted.data or [])
 
     emit_trace_demo(

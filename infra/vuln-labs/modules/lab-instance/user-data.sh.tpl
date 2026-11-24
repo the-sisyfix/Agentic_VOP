@@ -22,6 +22,20 @@ for i in 1 2 3; do
   sleep 10
 done
 
+# Install + start the Amazon SSM agent — required for SA-4's fix dispatch
+# (RemoteExecutor uses ssm:SendCommand against this instance). The frozen
+# Ubuntu 20.04 AMI used by env1 / env2 ships without a working agent, so
+# install explicitly. IAM permissions for SSM are already attached by the
+# module (see aws_iam_role_policy.ssm in main.tf).
+if ! systemctl is-active --quiet amazon-ssm-agent; then
+  snap install amazon-ssm-agent --classic 2>/dev/null || {
+    curl -fsSL "https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb" -o /tmp/amazon-ssm-agent.deb
+    dpkg -i /tmp/amazon-ssm-agent.deb || apt-get install -f -y
+  }
+  systemctl enable amazon-ssm-agent 2>/dev/null || snap start amazon-ssm-agent
+  systemctl start amazon-ssm-agent 2>/dev/null || true
+fi
+
 # Enable and start Docker
 systemctl enable docker
 systemctl start docker
@@ -164,6 +178,18 @@ PYDKREOF
 
 cd /opt/vuln-labs/python-image-lab
 timeout 300 docker build -t vuln-python-image:latest . || echo "WARNING: python-image-lab docker build timed out or failed"
+
+# =============================================================================
+# 3d. PHP Lab — Debian 12 + apt-pinned php8.2 (for Trivy Image)
+#     Produces the PHP2Shell OS-package CVEs (CVE-2026-109618/109619) plus
+#     other Debian CVEs. Dockerfile fetched from GitHub to keep user-data
+#     under the 16KB limit (same pattern as scan-server.py / cspm template).
+# =============================================================================
+mkdir -p /opt/vuln-labs/php-image-lab
+curl -fsSL "https://raw.githubusercontent.com/the-sisyfix/Agentic_VOP/main/infra/vuln-labs/php-image-lab/Dockerfile" \
+  -o /opt/vuln-labs/php-image-lab/Dockerfile
+cd /opt/vuln-labs/php-image-lab
+timeout 300 docker build -t vuln-php-image:latest . || echo "WARNING: php-image-lab docker build timed out or failed"
 
 # =============================================================================
 # 4. CSPM Lab — Vulnerable Terraform (applied as real AWS resources)
