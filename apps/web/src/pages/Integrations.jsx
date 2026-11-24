@@ -15,16 +15,6 @@ const BUILTIN_SCANNERS = [
   { tool: 'zap', label: 'OWASP ZAP' },
 ]
 
-// Scanners we deliberately hide from the "Run a scan" picker even if they're
-// registered. Dormant placeholders (no runnable endpoint) + redundant
-// duplicates of the -ec2 scanners we actually run on the demo fleet.
-// Module-level so the Set reference is stable across renders.
-const HIDDEN_SCANNERS = new Set([
-  'burp-suite', 'checkov-cspm', 'grype', 'qualys-vmdr-vuln',
-  'snyk-appsec', 'sonarqube-appsec', 'tenable-nessus-vuln',
-  'trivy-cloud', 'servicenow-ticket',
-  'semgrep-appsec', 'nvd-threat',
-])
 
 // Catalog cards use namespaced IDs (e.g. "owasp-zap-appsec") but some
 // scanners are registered under shorter slugs in connection_registry
@@ -67,6 +57,8 @@ const INTEGRATION_CATALOG = [
     oauthTool('dependabot', 'Github Dependabot'),
     oauthTool('hackerone-appsec', 'Hackerone'),
     apiTool('owasp-zap-appsec', 'OWASP ZAP'),
+    apiTool('semgrep-ec2', 'Semgrep'),
+    apiTool('serverless-ec2', 'Serverless Lab'),
     apiTool('snyk-appsec', 'Snyk'),
     apiTool('sonarqube-appsec', 'SonarQube'),
     apiTool('veracode-appsec', 'Veracode'),
@@ -81,11 +73,22 @@ const INTEGRATION_CATALOG = [
   { category: 'Cloud Security', tools: [
     apiTool('aws-inspect-cloud', 'AWS Inspect'),
     apiTool('aws-securityhub-cloud', 'AWS Security Hub (CSPM)'),
+    apiTool('checkov-ec2', 'Checkov (IaC)'),
     apiTool('crowdstrike-cloud', 'HorizonCSPM (Crowdstrike)'),
     apiTool('grype', 'Anchore Grype'),
     apiTool('paloalto-cloud', 'Prisma Cloud (Palo Alto)'),
     apiTool('tenable-cloud', 'Tenable Cloud Security'),
     apiTool('wiz-cloud', 'Wiz'),
+  ]},
+  { category: 'Vulnerability Scanners', tools: [
+    apiTool('trivy-fs-ec2', 'Trivy (Filesystem)'),
+    apiTool('trivy-image-ec2', 'Trivy (Container Image)'),
+    apiTool('trivy-image-java-ec2', 'Trivy (Java Image)'),
+    apiTool('trivy-image-php-ec2', 'Trivy (PHP Image)'),
+    apiTool('trivy-image-python-ec2', 'Trivy (Python Image)'),
+    apiTool('trivy-os-ec2', 'Trivy (OS)'),
+    apiTool('trivy-os-al2-ec2', 'Trivy (Amazon Linux 2)'),
+    apiTool('osv', 'OSV.dev'),
   ]},
   { category: 'DSPM / DLP', tools: [
     apiTool('cyera-dspm', 'Cyera'),
@@ -204,7 +207,7 @@ export default function Integrations() {
     }
     const map = new Map(BUILTIN_SCANNERS.map((s) => [s.tool, s]))
     for (const s of registeredScanners) {
-      if (s.enabled && !HIDDEN_SCANNERS.has(s.tool)) {
+      if (s.enabled) {
         map.set(s.tool, {
           tool: s.tool,
           label: catalogNameById.get(s.tool) || s.tool,
@@ -215,8 +218,12 @@ export default function Integrations() {
   }, [registeredScanners])
 
   const registeredByTool = useMemo(() => {
+    // Only enabled scanners count as "configured" — disabled rows exist for
+    // history/audit but should not light up the green dot.
     const m = new Map()
-    for (const s of registeredScanners) m.set(s.tool, s)
+    for (const s of registeredScanners) {
+      if (s.enabled) m.set(s.tool, s)
+    }
     return m
   }, [registeredScanners])
 

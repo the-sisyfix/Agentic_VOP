@@ -12,9 +12,38 @@ import { supabase } from '../lib/supabase'
 
 const FETCH_LIMIT = 500
 
+// Stale-while-revalidate cache — see useDashboardData.js for the full story.
+// Instant paint on revisits so the Issues page never flashes "No issues found"
+// while the real fetch is still in flight.
+const CACHE_KEY = 'sisyfix:issues:v1'
+const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const cached = JSON.parse(raw)
+    if (!cached || !cached.ts || Date.now() - cached.ts > CACHE_MAX_AGE_MS) return null
+    return cached.issues || null
+  } catch {
+    return null
+  }
+}
+
+function saveCache(issues) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), issues }))
+  } catch {
+    // best-effort
+  }
+}
+
 export function useIssuesData() {
-  const [issues, setIssues] = useState([])
-  const [loading, setLoading] = useState(true)
+  const _cached = loadCache()
+  const [issues, setIssues] = useState(_cached || [])
+  // No spinner needed when we already have cached rows — the fetch runs
+  // silently in the background and overwrites them.
+  const [loading, setLoading] = useState(!_cached)
 
   useEffect(() => {
     let mounted = true
@@ -74,6 +103,7 @@ export function useIssuesData() {
       }))
 
       setIssues(mapped)
+      saveCache(mapped)
       setLoading(false)
     }
 

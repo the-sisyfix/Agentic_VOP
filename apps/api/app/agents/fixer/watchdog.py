@@ -122,7 +122,7 @@ def sweep_stale_fix_runs(sb: Any) -> int:
     now = utcnow()
     resp = (
         sb.table("fix_runs")
-        .select("id, started_at, timeout_seconds, status")
+        .select("id, package_id, started_at, timeout_seconds, status")
         .in_("status", NON_TERMINAL_STATUSES)
         .limit(200)
         .execute()
@@ -170,6 +170,30 @@ def sweep_stale_fix_runs(sb: Any) -> int:
             )
             if resp.data:
                 reaped += 1
+                # Reconcile the parent package. Finalize normally flips the
+                # package to 'fix_failed' / 'fixed' / 'rolled_back' — but if
+                # the fixer crashed mid-execution finalize never ran, so the
+                # package is stuck in an in-flight state (ready_for_execution,
+                # provisioning, executing, validating). Mirror the reaped
+                # fix_run's outcome onto the package so the UI matches reality.
+                pkg_id = r.get("package_id")
+                if pkg_id:
+                    try:
+                        sb.table("remediation_packages").update({"status": "fix_failed"}).eq(
+                            "id", pkg_id
+                        ).in_(
+                            "status",
+                            [
+                                "ready_for_execution",
+                                "provisioning",
+                                "executing",
+                                "validating",
+                                "applying",
+                            ],
+                        ).execute()
+                    except Exception:  # noqa: BLE001, S110
+                        # Non-fatal — next sweep is idempotent via the status filter.
+                        pass
         except Exception:  # noqa: BLE001, S110
             # Ignoring is safe — next sweep will re-evaluate.
             pass

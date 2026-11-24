@@ -277,9 +277,20 @@ export default function Validation() {
   const [evidenceModalOpen, setEvidenceModalOpen] = useState(false)
   const [selectedEvidence, setSelectedEvidence] = useState(null)
   const [statusOverrides, setStatusOverrides] = useState({})
-  const [validationsData, setValidationsData] = useState([])
+  // Hydrate from localStorage so the Validation page paints instantly on
+  // revisits instead of flashing "No validations found" during the fetch.
+  const _cachedValidations = (() => {
+    try {
+      const raw = localStorage.getItem('sisyfix:validations:v1')
+      if (!raw) return null
+      const c = JSON.parse(raw)
+      if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
+      return c.rows || null
+    } catch { return null }
+  })()
+  const [validationsData, setValidationsData] = useState(_cachedValidations || [])
   const [remediationEvidenceData, setRemediationEvidenceData] = useState({})
-  const [, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!_cachedValidations)
 
   const itemsPerPage = 10
 
@@ -348,6 +359,9 @@ export default function Validation() {
         })
 
         setValidationsData(mapped)
+        try {
+          localStorage.setItem('sisyfix:validations:v1', JSON.stringify({ ts: Date.now(), rows: mapped }))
+        } catch { /* best-effort */ }
 
         // Build evidence map for the modal
         const evidenceMap = {}
@@ -609,9 +623,19 @@ export default function Validation() {
                 </thead>
                 <tbody>
                   {paginatedData.length === 0 ? (
-                    <tr>
-                      <td colSpan="100" className="validation-empty">No validations found</td>
-                    </tr>
+                    loading && validationsData.length === 0 ? (
+                      Array.from({ length: 8 }).map((_, i) => (
+                        <tr key={`skeleton-${i}`} className="validation-skeleton-row">
+                          <td colSpan="100">
+                            <span className="skeleton-block" style={{ height: 14, width: '95%' }} />
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="100" className="validation-empty">No validations found</td>
+                      </tr>
+                    )
                   ) : (
                     paginatedData.map(item => (
                       <tr key={`${viewMode}-${item.issue_id}`}>

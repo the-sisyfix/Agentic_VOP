@@ -42,6 +42,17 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
   // Track header keys removed by the user so we can signal deletion to the backend
   const [removedHeaderKeys, setRemovedHeaderKeys] = useState([])
 
+  // --- Advanced fields (top-level columns on connection_registry) ---
+  const [protocol, setProtocol] = useState('REST')
+  const [authType, setAuthType] = useState('custom')
+  const [rateLimitRpm, setRateLimitRpm] = useState('')
+  const [timeoutSec, setTimeoutSec] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // --- Custom metadata key/value pairs (e.g. vuln_id_filter, max_findings,
+  //     target_instance_id). Lives inside the metadata jsonb column. ---
+  const [metaPairs, setMetaPairs] = useState([{ key: '', value: '' }])
+
   useEffect(() => {
     if (!tool) return
     setError(null)
@@ -86,6 +97,17 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
         setHeadersRedacted(false)
       }
       setEnabled(existing.enabled)
+      setProtocol(existing.protocol || 'REST')
+      setAuthType(existing.auth_type || 'custom')
+      setRateLimitRpm(existing.rate_limit_rpm ?? '')
+      setTimeoutSec(existing.timeout_sec ?? '')
+      // Hydrate metadata key/value pairs — skip reserved keys the other
+      // inputs already manage (http_method, headers, response_path).
+      const reservedKeys = new Set(['http_method', 'headers', 'response_path'])
+      const customPairs = Object.entries(existing.metadata || {})
+        .filter(([k, v]) => !reservedKeys.has(k) && typeof v !== 'object')
+        .map(([key, value]) => ({ key, value: String(value) }))
+      setMetaPairs(customPairs.length ? customPairs : [{ key: '', value: '' }])
     } else {
       setSourceType('api')
       setEndpoint('')
@@ -94,6 +116,11 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
       setHeaders([{ key: '', value: '' }])
       setHeadersRedacted(false)
       setEnabled(true)
+      setProtocol('REST')
+      setAuthType('custom')
+      setRateLimitRpm('')
+      setTimeoutSec('')
+      setMetaPairs([{ key: '', value: '' }])
     }
   }, [tool, existing])
 
@@ -141,8 +168,34 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
     // If headersRedacted and no new values entered, omit headers entirely
     // so the PATCH preserves existing encrypted values via the deep merge.
     if (responsePath.trim()) meta.response_path = responsePath.trim()
+    // Merge the custom metadata pairs (vuln_id_filter, max_findings,
+    // target_instance_id, etc.). Try to parse numeric / boolean strings so
+    // backend code that checks `typeof x === 'number'` works correctly.
+    for (const { key, value } of metaPairs) {
+      const k = key.trim()
+      if (!k) continue
+      const raw = value.trim()
+      if (raw === '') {
+        meta[k] = null
+      } else if (/^-?\d+$/.test(raw)) {
+        meta[k] = parseInt(raw, 10)
+      } else if (/^-?\d*\.\d+$/.test(raw)) {
+        meta[k] = parseFloat(raw)
+      } else if (raw === 'true' || raw === 'false') {
+        meta[k] = raw === 'true'
+      } else {
+        meta[k] = raw
+      }
+    }
     return meta
   }
+
+  const updateMetaPair = (i, field, value) => {
+    setMetaPairs((prev) => prev.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)))
+  }
+  const addMetaPair = () => setMetaPairs((prev) => [...prev, { key: '', value: '' }])
+  const removeMetaPair = (i) =>
+    setMetaPairs((prev) => (prev.length <= 1 ? [{ key: '', value: '' }] : prev.filter((_, idx) => idx !== i)))
 
   // ---------- File helpers ----------
   const onPickFile = (f) => {
@@ -172,12 +225,19 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
           throw new Error('Endpoint URL is required.')
         }
         const metadata = buildApiMetadata()
+        // Top-level column overrides the backend accepts alongside metadata.
+        const advanced = {
+          protocol: protocol || 'REST',
+          auth_type: authType || 'custom',
+        }
+        if (String(rateLimitRpm).trim() !== '') advanced.rate_limit_rpm = Number(rateLimitRpm)
+        if (String(timeoutSec).trim() !== '') advanced.timeout_sec = Number(timeoutSec)
         let res
         if (existing && existing.connector_type !== 'file_upload') {
           res = await fetch(`${API_URL}/admin/scanners/${tool.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ endpoint: endpoint.trim(), enabled, metadata }),
+            body: JSON.stringify({ endpoint: endpoint.trim(), enabled, metadata, ...advanced }),
           })
         } else {
           // Either brand-new or switching from file → api: register fresh.
@@ -188,10 +248,9 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
               tool: tool.id,
               endpoint: endpoint.trim(),
               connector_type: 'user_endpoint',
-              protocol: 'REST',
-              auth_type: 'custom',
               metadata,
               enabled,
+              ...advanced,
             }),
           })
           if (res.status === 409) {
@@ -425,6 +484,108 @@ export default function ScannerEndpointModal({ tool, existing, onClose, onSaved 
                   </>
                 )}
               </div>
+            </>
+          )}
+
+          {!isFile && (
+            <>
+              <button
+                type="button"
+                className="sem-add-header"
+                onClick={() => setShowAdvanced(v => !v)}
+                style={{ marginTop: 8 }}
+              >
+                {showAdvanced ? '− Hide advanced' : '+ Advanced (protocol, auth type, rate limit, metadata…)'}
+              </button>
+
+              {showAdvanced && (
+                <div style={{ paddingTop: 8, borderTop: '1px solid #1E293B', marginTop: 8 }}>
+                  <label className="sem-label">Protocol</label>
+                  <span className="sem-help">Transport the connector should use. Most are REST.</span>
+                  <div className="sem-method-row">
+                    {['REST', 'GRAPHQL', 'S3', 'SSM', 'GIT', 'FILE'].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className={`sem-method-btn ${protocol === p ? 'active' : ''}`}
+                        onClick={() => setProtocol(p)}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+
+                  <label className="sem-label">Auth type</label>
+                  <span className="sem-help">How the scanner's API authenticates. Pick <code>custom</code> if you just use Headers above.</span>
+                  <select
+                    value={authType}
+                    onChange={(e) => setAuthType(e.target.value)}
+                    style={{ width: '100%', padding: 8, background: '#0F172A', border: '1px solid #334155', borderRadius: 6, color: '#F1F5F9' }}
+                  >
+                    {['none', 'api_key', 'bearer', 'basic', 'oauth', 'custom'].map((a) => (
+                      <option key={a} value={a}>{a}</option>
+                    ))}
+                  </select>
+
+                  <label className="sem-label">Rate limit (requests/min)</label>
+                  <span className="sem-help">Max fetches per minute. Leave empty for no limit.</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100000"
+                    placeholder="e.g. 60"
+                    value={rateLimitRpm}
+                    onChange={(e) => setRateLimitRpm(e.target.value)}
+                  />
+
+                  <label className="sem-label">Timeout (seconds)</label>
+                  <span className="sem-help">Per-request timeout. Leave empty for the default (~30s).</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="600"
+                    placeholder="e.g. 30"
+                    value={timeoutSec}
+                    onChange={(e) => setTimeoutSec(e.target.value)}
+                  />
+
+                  <label className="sem-label">Custom metadata</label>
+                  <span className="sem-help">
+                    Extra key/value pairs the connector can read (e.g. <code>vuln_id_filter</code>,
+                    <code> max_findings</code>, <code>target_instance_id</code>). Numbers and
+                    <code> true</code>/<code>false</code> are parsed automatically.
+                  </span>
+                  <div className="sem-headers">
+                    {metaPairs.map((p, i) => (
+                      <div key={i} className="sem-header-row">
+                        <input
+                          type="text"
+                          placeholder="key (e.g. max_findings)"
+                          value={p.key}
+                          onChange={(e) => updateMetaPair(i, 'key', e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          placeholder="value"
+                          value={p.value}
+                          onChange={(e) => updateMetaPair(i, 'value', e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="sem-header-remove"
+                          onClick={() => removeMetaPair(i)}
+                          aria-label="Remove metadata pair"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                    <button type="button" className="sem-add-header" onClick={addMetaPair}>
+                      + Add metadata key
+                    </button>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
