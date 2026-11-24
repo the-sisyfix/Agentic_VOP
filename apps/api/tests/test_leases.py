@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from postgrest.exceptions import APIError
 
 from app import leases
 from app.leases import LeaseTimeout, hold_lease
@@ -33,9 +32,10 @@ class _Query:
 
     def execute(self):
         with self.lock:
-            if self.op == "insert":
+            if self.op == "upsert_ignore":
+                # INSERT … ON CONFLICT DO NOTHING
                 if self.payload["resource"] in self.store:
-                    raise APIError({"code": "23505", "message": "duplicate key"})
+                    return SimpleNamespace(data=[])
                 self.store[self.payload["resource"]] = dict(self.payload)
                 return SimpleNamespace(data=[dict(self.payload)])
             hits = [r for r in self.store.values() if all(f(r) for f in self.filters)]
@@ -58,7 +58,9 @@ class FakeLeaseTable:
     def table(self, name):
         assert name == leases.LEASE_TABLE
         return SimpleNamespace(
-            insert=lambda p: _Query(self.rows, self._lock, "insert", p),
+            upsert=lambda p, on_conflict, ignore_duplicates: _Query(
+                self.rows, self._lock, "upsert_ignore" if ignore_duplicates else "upsert", p
+            ),
             update=lambda p: _Query(self.rows, self._lock, "update", p),
             delete=lambda: _Query(self.rows, self._lock, "delete"),
             select=lambda *_: _Query(self.rows, self._lock, "select"),

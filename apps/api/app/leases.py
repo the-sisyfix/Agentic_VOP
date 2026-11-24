@@ -34,12 +34,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from postgrest.exceptions import APIError
-
 logger = logging.getLogger(__name__)
 
 LEASE_TABLE = "run_leases"
-_UNIQUE_VIOLATION = "23505"
 
 
 class LeaseTimeout(RuntimeError):
@@ -91,12 +88,18 @@ class Lease:
 
     def try_acquire(self) -> bool:
         row = self._row()
-        try:
-            self.sb.table(LEASE_TABLE).insert(row).execute()
+        # INSERT … ON CONFLICT DO NOTHING: returns the row if we created it,
+        # nothing if it already exists. A plain insert would answer a held
+        # lease with HTTP 409 on every poll, and that error only parses as
+        # code 23505 when the response body validates — otherwise postgrest-py
+        # reports the bare status 409 and the run fails.
+        resp = (
+            self.sb.table(LEASE_TABLE)
+            .upsert(row, on_conflict="resource", ignore_duplicates=True)
+            .execute()
+        )
+        if resp.data:
             return True
-        except APIError as e:
-            if getattr(e, "code", None) != _UNIQUE_VIOLATION:
-                raise
         # Row exists. Take it over only if it has expired — the WHERE clause
         # makes this a single atomic compare-and-set in Postgres, so two
         # waiters can't both win.
