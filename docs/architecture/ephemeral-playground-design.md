@@ -42,6 +42,23 @@ can be removed.
    force a redesign.
 6. All new behavior is behind a flag. Default keeps today's behavior.
 
+## 3a. Decisions recorded (rev 2)
+
+| Topic | Decision |
+|---|---|
+| Max simultaneous playground leases | 5 (configurable) |
+| Plain ingest (`/agents/trigger`) | Unblocked. It never uses a playground, so it is removed from the guard |
+| HITL runs | No instance is created at trigger. The lease is created on the first approval that dispatches a fix |
+| SA-3 file reads | Read from a read-only baseline instance (the existing static instance, which stops receiving fixes in ephemeral mode), not from a lease |
+| Playground contents | Only the labs needed by the scanners in the run (section 9a) |
+| Sandbox account | A separate AWS account, not an IAM user in the current account (section 10) |
+| Pilot scope | Dev Supabase project and current branch only; flag defaults to off |
+| HITL idle timeout | 30 minutes after the last fix (initial value) |
+| Capacity full at trigger | Reject immediately with a clear message (nothing has been spent yet) |
+| Capacity full at approve | Queue: the approval is kept and the fix starts when a slot frees (section 8) |
+| Account for the pilot | Current account, dev area, same tagging and quotas; sandbox account later (config only) |
+| SA-3 baseline source | Behind a `BaselineReader` seam; static instance first, replaced later (section 6a) |
+
 ## 4. What is in the first delivery and what is deferred
 
 Management wants this simple and ready for the demo. The split below keeps the first delivery to
@@ -93,10 +110,12 @@ lease is keyed on it.
                          |
    run_master (real pipeline, minutes)   runs while the instance boots
                          |
-   SA-3  -> TargetResolver.for_run(run_id) -> instance_id   (file reads)
-   SA-4  -> TargetResolver.for_run(run_id) -> instance_id   (fix lifecycle)
+   SA-3  -> baseline reader instance (read-only file reads, no lease)
+   SA-4  -> TargetResolver.for_run(run_id) -> leased instance_id   (fix lifecycle)
                          |
-   pipeline finished / all packages terminal / TTL  ->  PlaygroundService.release(run_id)
+   fix stage done / all packages terminal / idle timeout / TTL  ->  PlaygroundService.release(run_id)
+
+   (HITL pre-approval runs: the acquire step happens at the first approve, not at trigger.)
 ```
 
 Components (all new, in one package, e.g. `app/services/playground/`):
@@ -111,6 +130,46 @@ Components (all new, in one package, e.g. `app/services/playground/`):
   terminates any instance carrying our tags that has no active lease.
 
 Feature flag: `PLAYGROUND_MODE=static|ephemeral`, default `static`.
+
+## 6a. Baseline reader seam: how the static instance goes away
+
+Using the static instance as SA-3's baseline is a bridge, not the end state. To keep it from
+spreading, SA-3's file reads go through one interface and the static instance is just the first
+implementation.
+
+`BaselineReader.read(path, run_context) -> (content, content_hash)`
+
+| Implementation | Source | When |
+|---|---|---|
+| `StaticInstanceReader` | SSM `cat` on the baseline instance (today's `file_fetch` behavior) | Phase 1, flag on or off |
+| `RepoAtCommitReader` | The replica source repo at a pinned commit (the demo client repo, GitHub API or a shallow clone) | When the client repo exists (Stage 6) |
+| `ManifestReader` | Same, driven by the build manifest of the scanned build | With real client CI/CD |
+
+Only `file_fetch.py` (and the two callers that pass `target_instance_id=None`) changes to use the
+seam. `PLAYGROUND_MODE=static` is itself a temporary compatibility flag. The retirement plan:
+
+1. Stage 2: introduce the seam with `StaticInstanceReader`.
+2. Stage 6: the demo client repo and manifest exist; the golden AMI is built from the same commit,
+   so the repo content is what the replica contains. Switch the reader to `RepoAtCommitReader`.
+3. After one release cycle on the new reader: delete `StaticInstanceReader`, the static provider,
+   `FIXER_ENV2_INSTANCE_ID` as a planning input, and the `static` mode of the flag. The old
+   env2/env3 instances are then used only as an AMI build source, or destroyed.
+
+Safety net that makes switching readers low-risk: SA-3 records the hash of every file it read, and
+SA-4 verifies it against the file on the leased instance before the first edit. A mismatch fails
+fast with a clear message instead of producing a bad edit.
+
+Two problems to resolve in Stage 2, whichever reader is used:
+- **Per-lease names inside files.** `cspm-lab-template.tf` and `serverless-lab-template.tf` embed
+  the instance `name_prefix` in resource names [Verified], and SA-3 composes `#EDIT_FILE old_text`
+  verbatim from the file it read [Verified in `agent_v2.py` prompts]. If a leased instance has a
+  different prefix from the baseline, an edit whose `old_text` contains a name will not match, and
+  a plain content hash will differ for every IaC file. Fix: derive the lease `name_prefix`
+  deterministically from the run id before planning, render the baseline with that prefix, and
+  compute the hash over content normalized for the prefix.
+- **Files not in the repo.** The infra, java and python Dockerfiles exist only as heredocs in
+  `user-data.sh.tpl` and in the `/admin/env2/reset-images` script [Verified], not as files in
+  `infra/vuln-labs`. A repo-based reader needs them committed (the demo client repo covers this).
 
 ## 7. Data model (dev Supabase only; new migration file, applied manually to dev)
 
@@ -135,19 +194,41 @@ The existing `fix_runs.target_instance_id` column is used as-is.
 
 ## 8. Lifecycle
 
-1. **Acquire**: on a demo trigger (flag on), insert a lease (`provisioning`) and launch
-   asynchronously. The real ingest pipeline (`run_master`) runs while the instance boots, which
-   hides most of the boot time.
-2. **Ready gate**: before SA-3 starts, wait until the lease is `ready`: instance running, SSM
-   agent `Online`, a health probe passes (lab files present). On timeout the run fails with a
-   clear message and the lease is released.
-3. **Use**: SA-3 file reads and SA-4 use the leased instance. Fix runs on different leases do not
-   block each other.
-4. **Release**: automatic pipelines release after the fix stage. HITL pipelines keep the lease
-   until every package is terminal (fixed, rolled back, failed, rejected) or the TTL passes.
-   Release runs teardown (section 9), then terminates the instance.
-5. **TTL**: every lease has `expires_at`. HITL waits on humans, so the TTL has to be long enough
-   (open question 3).
+SA-3 does not need a lease. It reads target files from the read-only baseline instance, so planning
+can run in parallel for any number of runs. A lease is needed only when SA-4 will actually fix.
+
+**Automatic pipelines** (`trigger_demo`, `trigger_demo_hitl_review`, `trigger_demo_hitl_verified_pr`):
+1. **Acquire** at trigger: insert a lease (`provisioning`) and launch asynchronously. Ingest, SA-1,
+   SA-2 and SA-3 run while the instance boots, which hides most of the boot time.
+2. **Ready gate**: before the fix stage, wait until the lease is `ready`: instance running, SSM
+   agent `Online`, health probe passes (the selected lab files are present). On timeout the run
+   fails with a clear message and the lease is released.
+3. **Use**: SA-4 uses the leased instance. Runs on different leases do not block each other.
+4. **Release**: after the fix stage (and, for the review and Verified-PR variants, after the
+   post-fix human review is finished or the TTL passes). Release runs teardown (section 9), then
+   terminates the instance.
+
+**HITL pre-approval pipeline** (`trigger_demo_hitl`): SA-3 packages land as `awaiting_approval`
+and SA-4 does not run until a human approves.
+1. No lease at trigger.
+2. The first approve call acquires the lease for that run and waits for it to be ready (this adds
+   boot time after the click; show "preparing playground" in the UI).
+3. Later approvals of packages from the same run reuse the lease.
+4. Release when every package of the run is terminal, or after an idle timeout since the last
+   fix (not a long absolute TTL). This avoids paying for an idle instance while people decide.
+
+**Capacity full on approve: queue, do not ask the user to retry.** An approval is a durable human
+decision; making the user click again loses it and invites duplicate clicks. The approve endpoint
+already hands the fix to a background task, and `run_fixer` today already waits for the lock for
+up to 30 minutes [Verified], so queuing keeps the current model: the task waits for a free lease
+slot (polling the DB), the package shows "waiting for playground", and the fix starts when a slot
+frees. Two costs to handle in Stage 3: a waiting task holds a worker thread, and an API restart
+would drop the in-memory wait, so a recovery sweep must re-dispatch packages left in
+`ready_for_execution` with no fix run. **At trigger time, capacity full is rejected** instead of
+queued, because nothing has been spent yet and the user can simply try again.
+
+**TTL**: every lease has `expires_at` as a hard ceiling to stop leaks. For the HITL case the idle
+timeout is the practical limit (open question 3).
 
 ## 9. Teardown and real AWS resources
 
@@ -170,9 +251,63 @@ prefix before Terraform is touched.
 - Cost/time: the first-boot `terraform apply` of two labs may add minutes and is a risk for the
   "minutes" target. Options are in the spike (section 12).
 
+## 9a. Lab profiles: provision only what the run needs
+
+A playground should contain only the system under test for the scanners in the run. Reasons:
+faster and cheaper boot, no unrelated cloud resources created, and least privilege (an appsec
+replica needs no AWS permissions at all).
+
+Scanner-to-lab mapping (from the scan server paths [Verified in `scan-server.py`] and the path
+logic in `planner._extract_iac_context` [Verified]):
+
+| Scanner (source) | Lab on the instance | Cloud resources? | Instance permissions needed |
+|---|---|---|---|
+| semgrep, trivy-fs | appsec-lab | No | None beyond SSM |
+| checkov | cspm-lab | Yes | S3, EC2 SG, KMS, IAM policy, logs, SNS, SQS (scoped to `cspm-lab-<prefix>*`) |
+| serverless semgrep | serverless-lab | Yes | IAM role/policy and Lambda scoped to `serverless-lab-<prefix>*` |
+| trivy-image (infra, java, python, php) | image labs, one image each | No | Docker only |
+| trivy-os (env1/2 style) | the host itself | No | None beyond SSM |
+
+A run's profile is the union of the labs for its selected scanners (`payload.targets.scanners`).
+
+Mechanism for Phase 1: one golden AMI that already contains all lab files and the pre-built
+Docker images (cheap, they are just disk). A first-boot step activates only the profile:
+- Cloud labs (CSPM, serverless) are applied with Terraform only if they are in the profile. This
+  also removes the biggest boot-time risk for runs that don't need them.
+- The instance profile is chosen from the profile. Runs without a cloud lab get an instance role
+  with SSM only.
+
+Later, with the client-manifest source (Phase 2), each replica is built from the client's own
+artifacts for that family, so per-lab AMIs or builds follow naturally.
+
+A run with several scanners (for example appsec plus CSPM) gets one instance with both labs. Fixes
+on one instance still run one at a time, as today.
+
+Note: the OS-package scanners in the existing `-ec2` flow fix the host itself. Whether an
+ephemeral instance gives a faithful host replica depends on the AMI baseline matching what was
+scanned (the OS track is separate and undecided).
+
 ## 10. Security model
 
-Rules that apply from Phase 1:
+**Separate AWS account means a different AWS account ID, not an IAM user.** An IAM user in the
+current account is only another login. It shares the account's quotas, billing, resource
+namespace and blast radius, so a bad IAM policy or a leaked resource still lands next to the
+product. A separate account (created under AWS Organizations, with its own root email) is a hard
+boundary: the playground's mistakes and costs cannot touch product resources, and it can have its
+own quotas and budget alerts.
+
+Cross-account access model: the backend assumes a narrowly scoped role in the sandbox account
+(`sts:AssumeRole`) and uses that session for EC2 and SSM calls. The sandbox account owns the
+instances, the AMI (shared from a build account or copied), and the playground state buckets.
+Today the backend builds plain boto3 clients with default credentials [Verified in
+`remote_exec.py` and `main.py`], so the cross-account switch adds one more touch point: a client
+factory that returns the assumed-role session.
+
+For the pilot, the account is a configuration value (role ARN, region, subnet, AMI id), so the
+code does not change when the account is created. Until then the pilot can run in the dev
+environment of the current account with the same tagging and quotas.
+
+Other rules that apply from Phase 1:
 
 - Instances launch with no SSH ingress, no public IP if the network allows it, IMDSv2 required,
   encrypted volumes, and egress limited to what the fixes need (package mirrors, registries,
@@ -199,14 +334,22 @@ For dev, the developer's own credentials are used.
 
 Touch points, so the impact on current behavior is reviewable:
 
-1. `main.py`: `_guard_env2_free_for_trigger()`. When flag is on, replace the global busy check with
-   the capacity check, and start the lease in the demo trigger background functions.
+1. `main.py`: `_guard_env2_free_for_trigger()`. When flag is on: remove it from `/agents/trigger`
+   (ingest never uses a playground), and in the demo triggers replace the global busy check with
+   the capacity check (max 5 leases). Start the lease in the demo trigger background functions
+   (automatic variants) or in the approve endpoint (HITL pre-approval variant).
 2. `fixer/orchestrator.py`: resolve the target via `TargetResolver`. Make `_ENV2_DISPATCH_LOCK`
    per-instance (a dict of locks keyed by instance id). Scope the wait loop.
 3. `fixer/persistence.py`: `any_concurrent_run(sb, target_instance_id=None)`. With no argument,
    behavior is unchanged.
-4. `remediation/tools/file_fetch.py` callers (`agent_v2.py`, `kb_replay.py`): pass the run's
-   instance instead of `None`.
+4. `remediation/tools/file_fetch.py` callers (`agent_v2.py`, `kb_replay.py`): they currently pass
+   `None` (falls back to `FIXER_ENV2_INSTANCE_ID`). In ephemeral mode that value becomes the
+   read-only baseline instance, so no code change is needed there, but the static instance must
+   stop receiving fixes and be kept at the pristine baseline. Retry planning after earlier fixes
+   in the same run reads the baseline, not the fixed state; check that this is acceptable in
+   Stage 2.
+4b. A client factory for EC2 and SSM (used by `remote_exec.py`, the playground service and the
+   reset endpoints) so the sandbox-account role can be assumed. Default returns today's client.
 5. HITL approve endpoint: no change needed, since it dispatches by the package's `agent_run_id`.
 6. `main.py` reaper: add lease expiry and leak sweeping.
 7. New migration (dev) for `playground_leases`.
@@ -309,11 +452,92 @@ replicas (client AMI, package manifest) is undecided.
 
 ## 17. Open questions
 
+0. Parallel safety outside the playground (found while reviewing the pipeline, to verify in
+   Stage 3):
+   - Demo sampling is scoped to the triggering run when `real_run_id` is passed [Verified in
+     `sample_from_real.py`], so parallel runs do not mix issues.
+   - `connection_registry.last_fetched_at` is a per-scanner watermark shared by all runs
+     [Verified in `sub_agent_1.py`]. For connectors that apply it (dependabot, osv, tenable
+     [Verified]) two parallel runs of the same scanner can see different data. The `user_endpoint`
+     connector ignores it [Verified: parameter unused]. Whether the `-ec2` scan-server scanners use
+     `user_endpoint` is unconfirmed: their registry rows are not in the migrations, they live only
+     in the database. Check the `connector_type` of those rows in dev.
+   - The run-cancel endpoint (`main.py` around line 2780) deletes ALL `issues` and `raw_findings`
+     for each scanner of the cancelled run, and resets that scanner's watermark [Verified]. With
+     parallel users, cancelling one run deletes another user's findings for the same scanner.
+     It needs to delete only rows with `agent_run_id` = the cancelled run.
+   - The demo schema is shared; `POST /agents/demo/reset` wipes it for everyone [Verified]. Demo
+     data is not scoped per user, and the UI shows demo packages cumulatively.
+   - `remediation_kb` counters (`times_reused`, `times_succeeded`) are read-modify-write [Verified
+     in `kb_capture.py`], so parallel fixes can lose increments. Best-effort, low impact.
+   - LLM rate limits: each run uses up to `LLM_PARALLEL_WORKERS` (default 5) concurrent calls
+     [Verified in config], so 5 parallel runs can reach 25 concurrent calls.
 1. Tenancy: shared SaaS in our account, or deployed in the client's account? (Management.)
 2. Instance type and size for each family; whether image-family fixes need larger disks (Docker
    builds on a 20 GB root volume are tight) [Assumption].
-3. TTL for HITL runs.
-4. Maximum simultaneous leases.
-5. Whether `/agents/trigger` (plain ingest) should be unblocked in the same change. Today it is
-   blocked by the same guard [Verified]. Ingest alone does not use the playground.
+3. (Decided) Idle timeout for HITL leases after the last fix: 30 minutes to start.
+4. (Decided) Maximum simultaneous leases = 5.
+5. (Decided) Plain ingest is unblocked.
 6. Whether more than one API worker or host is planned. Leases in the DB make it safe either way.
+7. (Decided) Capacity full on approve: queue. At trigger: reject.
+
+---
+
+## 18. Spike results (executed)
+
+Run from a developer machine with AWS CLI access to account 486655355038, us-east-1. Only dev
+playground env3 (`i-01d2c874fe4092e2f`) was read (SSM read-only commands). Nothing was changed on
+env3, env2 or any other existing instance. All spike resources were tagged
+`Component=playground-spike` and removed at the end; a leftover check returned nothing, and env3
+was still running.
+
+What was done: no-reboot AMI of env3, one clone launched from it (no user-data, no SSH ingress,
+IMDSv2 required, public IP only for SSM egress, env3's instance profile), probes over SSM, the real
+`RemoteExecutor`, `file_ops` and `safety` modules driven against the clone, a plan-only Terraform
+test with a rewritten prefix and state key, then full teardown.
+
+| Question | Result |
+|---|---|
+| Does a clone register with SSM and pass the lab probe? | Yes. Running after 11 s, SSM `Online` after 58 s. Labs, Docker images and scanners (terraform 1.7.5, docker 26.1.3, trivy 0.76.2, checkov 3.2.477, semgrep 1.99.0) were all present |
+| Does cloud-init re-run the original user-data on the clone? | No. A new instance directory was created and no terraform or docker build processes ran. `SETUP_COMPLETE` kept the original Nov 9 timestamp |
+| Per-command SSM round trip | About 2.5 s for a trivial command |
+| Do the real fixer primitives work unchanged against the clone? | Yes: `is_reachable`, `file_exists`, `backup_file`, the safety validator (allows a benign `sed`, blocks `reboot`), a Trivy FS rescan of appsec-lab (35 s, DB cached, 141 findings) and a cached `docker build` (3 s). I did not run `run_fixer` itself (needs Supabase and the LLM) |
+| Prefix and state-key rewrite | Works. Replacing `vop-vuln-lab-env3` with a new prefix in a copy of `main.tf.original` and `backend.hcl` gave a clean plan of 8 resources to add with unique names (for example `cspm-lab-spike-i0240c877-bucket`). Init 40 s with the plugin cache copied, plan 6 s. env3's real state object was untouched and nothing was written under the new key |
+| IMDSv2 enforced | Works. IMDSv1 returned 401 on the clone; SSM and the AWS CLI still worked. env3 itself still allows IMDSv1 (returned 200 without a token) |
+| Quota | 256 standard vCPUs available. Five `t3.small` instances use 10 |
+| AMI creation time | Snapshot of the 20 GB root volume took more than 16 minutes before the AMI became available. This is a build-time cost, not a per-run cost |
+
+Not tested: a real `terraform apply` and destroy of the cloud labs (boot-time impact of the CSPM and
+serverless labs is therefore still unmeasured), two clones running at the same time, an end-to-end
+`run_fixer`, tag-conditioned SSM IAM, private-subnet operation (SSM needs a path out: I used a public
+IP with no ingress; a private subnet would need VPC endpoints or NAT), and the serverless lab plan.
+
+### Findings that change the plan
+
+1. **A snapshot of a used instance is not a clean baseline.** Env3 currently has a modified
+   `main.tf` (6402 bytes vs 6126 in `main.tf.original`), 7 `main.tf.bak-*` files, `.bak` files in
+   the appsec, infra and serverless labs, a `vuln-lab-image:pre-fix-21` image and dangling images.
+   The golden AMI must be built from clean source (the repo, or a freshly built instance), never
+   by snapshotting env2 or env3. Stage 1 is updated accordingly.
+2. **`main.tf.original` exists on env3, but it was created by hand** (root-owned, Nov 10), not by
+   `user-data`. The `/admin/env2/reset` endpoint depends on it. The golden AMI build must create
+   it.
+3. **The clone inherits env3's IAM role** (`vop-vuln-lab-env3-role`), and therefore its access to
+   env3's Terraform state prefix and the `ec2:*` and `kms:*` rights. Per-lease instance profiles
+   with scoped permissions (section 9a and 10) are required, not optional.
+4. **Disk is tight.** The root volume is 20 GB, 51 to 67 percent used on a lab that has few images.
+   Docker builds and multiple lab images need a larger root volume in the golden AMI.
+5. **Boot is no longer the main time risk.** Clone to SSM-ready is about a minute. The remaining
+   unknown is the real Terraform apply of the cloud labs, which the lab profile design already
+   makes optional.
+6. **Registry data check** (from the `connection_registry` rows provided):
+   - Every `-ec2` scanner uses `connector_type: user_endpoint`, which ignores the watermark
+     [Verified in code], so the watermark concern does not apply to them.
+   - `trivy-os-al2-ec2` has `target_instance_id: i-0e374829ec5fc880c`, which does not appear among
+     the instances in this account and region (env4 is `i-0a36547952c4eff35`, env5 is
+     `i-0cf480a449cff16a8`). The OS-track target is either stale or in another account or region.
+     Fixes for that scanner would fail pre-flight until the value is corrected.
+   - All other scanners have no `target_instance_id`, so they use `FIXER_ENV2_INSTANCE_ID`.
+   - The scan-server endpoints use public IPs (`35.173.249.140` for env1,
+     `18.213.193.246` for env4). The workflow notes that the public IP changes after a stop and
+     start.
