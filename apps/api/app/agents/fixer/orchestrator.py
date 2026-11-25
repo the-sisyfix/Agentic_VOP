@@ -54,13 +54,22 @@ from .watchdog import RunCancelledError, WatchdogTimeout, check_run_health
 # killed process blocked everyone for 30 minutes. The lease is shared by
 # every process and schema and expires ENV2_LEASE_TTL_S after its holder
 # dies.
-ENV2_LEASE_RESOURCE = "fixer:env2"
+#
+# One lease per target instance, not one global lease: prod fixes on env2
+# and dev fixes on env3 (or OS fixes on the AL2 instance) touch different
+# machines and run in parallel. Reset endpoints in main.py take the same
+# lease so a reset never runs during a fix on that instance.
 ENV2_LEASE_TTL_S = 120
 # 30 min total wait. Sized to survive a slow SA-4 fix chain (~90s each ×
 # 20 packages = 30 min worst case) so a legitimately long-running fix
 # upstream doesn't cause downstream package casualties.
 ENV2_LEASE_WAIT_MAX_S = 1800
 ENV2_LEASE_POLL_S = 10
+
+
+def env2_lease_resource(instance_id: str) -> str:
+    """Lease key for the fix sandbox `instance_id`."""
+    return f"fixer:{instance_id or 'default'}"
 
 
 # =============================================================================
@@ -262,10 +271,14 @@ def run_fixer(
     if FixerConfig.allow_concurrent_runs:
         return _run_fixer_locked(**run_kwargs)
 
-    # Serialize env2 dispatches across every process, host and schema. Even
-    # if several background tasks reach here at once (typical when a user
-    # approves 5 HITL packages in quick succession, or two users trigger
-    # pipelines together), only one holds the lease; the rest wait.
+    # Serialize dispatches to the same fix sandbox across every process, host
+    # and schema. Even if several background tasks reach here at once
+    # (typical when a user approves 5 HITL packages in quick succession, or
+    # two users trigger pipelines together), only one holds the lease for a
+    # given instance; the rest wait. Fixes bound for different instances
+    # (prod's env2 vs dev's env3, or the AL2 OS target) don't block each other.
+    target_instance_id = _target_instance_for_package(sb, package_id, cfg)
+
     def _on_wait(holder: dict | None) -> None:
         emit_fn(
             agent_run_id,
@@ -279,7 +292,7 @@ def run_fixer(
 
     try:
         with hold_lease(
-            ENV2_LEASE_RESOURCE,
+            env2_lease_resource(target_instance_id),
             label=f"package #{package_id}, agent_run {agent_run_id}",
             ttl_s=ENV2_LEASE_TTL_S,
             wait_max_s=ENV2_LEASE_WAIT_MAX_S,
@@ -305,6 +318,51 @@ def run_fixer(
             f"then retry. Run `python scripts/check_env2_status.py` from "
             f"apps/api to see live state."
         ) from e
+
+
+def _resolve_target_instance_id(cfg: FixerConfig, source: str) -> str:
+    """Instance a fix for `source`'s findings runs on.
+
+    Scanners with a dedicated fix target (e.g. trivy-os-al2-ec2 → AL2
+    instance) set target_instance_id in connection_registry.metadata; the
+    rest use this backend's FIXER_ENV2_INSTANCE_ID (env2 on prod, env3 on
+    dev). Returns "" when neither is configured.
+    """
+    target_instance_id = cfg.env2_instance_id or ""
+    if source:
+        try:
+            from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
+
+            _sb_pub = _sb_pub_fn()
+            reg_row = (
+                _sb_pub.table("connection_registry")
+                .select("metadata")
+                .eq("tool", source)
+                .single()
+                .execute()
+                .data
+            )
+            reg_meta = (reg_row or {}).get("metadata") or {}
+            if reg_meta.get("target_instance_id"):
+                target_instance_id = reg_meta["target_instance_id"]
+        except Exception:  # noqa: BLE001, S110
+            pass  # Fall through to default
+    return target_instance_id
+
+
+def _target_instance_for_package(sb: Any, package_id: int, cfg: FixerConfig) -> str:
+    """Best-effort target lookup used to pick the lease before the run starts.
+
+    Missing rows fall back to the default instance; _run_fixer_locked does
+    the authoritative load and raises the real error.
+    """
+    try:
+        pkg_row = _load_package(sb, package_id) or {}
+        issue_row = _load_issue(sb, int(pkg_row["issue_id"])) if pkg_row else None
+        source = (issue_row or {}).get("source") or ""
+    except Exception:  # noqa: BLE001
+        source = ""
+    return _resolve_target_instance_id(cfg, source)
 
 
 def _run_fixer_locked(
@@ -429,26 +487,8 @@ def _run_fixer_locked(
     #    instance), look up target_instance_id from connection_registry.metadata.
     #    Falls back to the default FIXER_ENV2_INSTANCE_ID for scanners without
     #    a dedicated target (most cases).
-    target_instance_id = cfg.env2_instance_id or ""
     source = issue_row.get("source") or ""
-    if source:
-        try:
-            from ...db import supabase_admin as _sb_pub_fn  # noqa: PLC0415
-
-            _sb_pub = _sb_pub_fn()
-            reg_row = (
-                _sb_pub.table("connection_registry")
-                .select("metadata")
-                .eq("tool", source)
-                .single()
-                .execute()
-                .data
-            )
-            reg_meta = (reg_row or {}).get("metadata") or {}
-            if reg_meta.get("target_instance_id"):
-                target_instance_id = reg_meta["target_instance_id"]
-        except Exception:  # noqa: BLE001, S110
-            pass  # Fall through to default
+    target_instance_id = _resolve_target_instance_id(cfg, source)
 
     if not target_instance_id:
         raise RuntimeError(

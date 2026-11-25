@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .agents.connectors.file_upload import SCANNER_BUCKET, sniff_format
@@ -177,7 +178,6 @@ def trigger_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -> Run
          that run instead of creating a new one. Catches rapid double-clicks,
          network retries, etc.
     """
-    _guard_env2_free_for_trigger()
     sb = supabase_admin()
 
     # Layer 1 — exact event_id match
@@ -326,7 +326,6 @@ def trigger_demo_run(payload: TriggerEvent, background_tasks: BackgroundTasks) -
     Real progress is streamed to the public.agent_trace_events realtime channel
     for the Agents page's Real Pipeline mode.
     """
-    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -397,7 +396,6 @@ def trigger_demo_hitl_run(payload: TriggerEvent, background_tasks: BackgroundTas
         auto-run. The user approves/rejects each package in the Remediation
         page; approve triggers SA-4 for that package in the background.
     """
-    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -477,7 +475,6 @@ def trigger_demo_hitl_review_run(
     Requires migration 0041 for the new status values + review_required
     column + fix_runs.review_diff. Falls back gracefully if not applied.
     """
-    _guard_env2_free_for_trigger()
     import uuid
 
     sb_pub = supabase_admin()
@@ -560,7 +557,6 @@ def trigger_demo_hitl_verified_pr_run(
 
     Requires GITHUB_PAT + GITHUB_REPO env vars.
     """
-    _guard_env2_free_for_trigger()
     import uuid
 
     # Fail fast if GitHub isn't configured — better a clear 400 than a
@@ -770,21 +766,43 @@ def _guard_env2_free_for_reset() -> None:
         )
 
 
-def _guard_env2_free_for_trigger() -> None:
-    """Raise 409 if env2 is busy — called from every trigger endpoint so two
-    users starting pipelines back-to-back learn immediately instead of
-    discovering it at SA-4 after wasting SA-1/2/3 work.
+def _holds_env2_lease(fn):
+    """Run a reset endpoint while holding this backend's fix-sandbox lease.
+
+    The same lease SA-4 takes in fixer.orchestrator.run_fixer, so a reset and
+    a fix never run on the instance at once — even when the fix was started
+    by another process or a pipeline that began after the reset's status
+    check. Fails fast with 409 instead of waiting: resets are interactive.
     """
-    st = _get_env2_status()
-    if st.busy:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Pipeline busy — {st.reason}. One pipeline at a time against "
-                f"env2 (shared fix sandbox). Wait for it to complete, or hit "
-                f"/admin/env2/force-release if it's stuck."
-            ),
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from .agents.fixer.orchestrator import (  # noqa: PLC0415
+            ENV2_LEASE_TTL_S,
+            env2_lease_resource,
         )
+        from .leases import LeaseTimeout, hold_lease  # noqa: PLC0415
+
+        try:
+            with hold_lease(
+                env2_lease_resource(settings.fixer_env2_instance_id),
+                label=f"reset {fn.__name__}",
+                ttl_s=ENV2_LEASE_TTL_S,
+                wait_max_s=0,
+            ):
+                return fn(*args, **kwargs)
+        except LeaseTimeout as e:
+            holder = e.holder or {}
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"env2 is busy — a fix is running ({holder.get('label') or 'unknown'}, "
+                    f"since {(holder.get('acquired_at') or '?')[:19]}). Wait for it to "
+                    f"complete, or hit /admin/env2/force-release if it's stuck."
+                ),
+            ) from e
+
+    return wrapper
 
 
 @app.get("/admin/env2/status", response_model=Env2StatusResponse)
@@ -895,6 +913,19 @@ def env2_force_release() -> ForceReleaseResponse:
             if schema_name not in schemas_touched:
                 schemas_touched.append(schema_name)
 
+    # Drop this backend's fix-sandbox lease so the next fix or reset can
+    # start now instead of after the TTL. Only this instance's lease: on a
+    # shared Supabase project, another environment's sandbox stays locked.
+    try:
+        from .agents.fixer.orchestrator import env2_lease_resource  # noqa: PLC0415
+        from .leases import LEASE_TABLE, _leases_client  # noqa: PLC0415
+
+        _leases_client().table(LEASE_TABLE).delete().eq(
+            "resource", env2_lease_resource(settings.fixer_env2_instance_id)
+        ).execute()
+    except Exception:  # noqa: BLE001, S110
+        pass
+
     return ForceReleaseResponse(
         fix_runs_closed=fix_closed,
         agent_runs_closed=run_closed,
@@ -903,6 +934,7 @@ def env2_force_release() -> ForceReleaseResponse:
 
 
 @app.post("/admin/env2/reset")
+@_holds_env2_lease
 def reset_env2_baseline() -> dict:
     """Reset the env2 vulnerable-lab EC2 back to its fresh baseline.
 
@@ -1061,6 +1093,7 @@ echo "=== DONE ==="
 
 
 @app.post("/admin/env2/reset-images")
+@_holds_env2_lease
 def reset_env2_images() -> dict:
     """Reset all 3 trivy-image Dockerfiles on env2 to their vulnerable baseline.
 
@@ -1272,6 +1305,7 @@ echo "=== Reset complete ==="
 
 
 @app.post("/admin/env2/reset-php")
+@_holds_env2_lease
 def reset_env2_php() -> dict:
     """Reset the PHP image lab on env2 back to the vulnerable baseline.
 
@@ -1554,6 +1588,7 @@ def _vuln_labs_dir():
 
 
 @app.post("/admin/env2/reset-appsec")
+@_holds_env2_lease
 def reset_env2_appsec() -> dict:
     """Reset appsec-lab source files on env2 to their pristine vulnerable state.
 
@@ -1584,6 +1619,7 @@ def reset_env2_appsec() -> dict:
 
 
 @app.post("/admin/env2/reset-serverless")
+@_holds_env2_lease
 def reset_env2_serverless() -> dict:
     """Reset serverless-lab source + Terraform template on env2 to vulnerable state.
 

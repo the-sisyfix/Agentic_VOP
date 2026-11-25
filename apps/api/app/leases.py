@@ -170,7 +170,7 @@ def hold_lease(
     """Block until `resource` is held, yield the seconds spent waiting, release on exit.
 
     Args:
-        resource:    lease key, e.g. "fixer:env2" or "sa1:public:tenable"
+        resource:    lease key, e.g. "fixer:<instance_id>" or "sa1:public:tenable"
         label:       human-readable owner shown to waiters ("package #12, run abc…")
         ttl_s:       how long a dead holder can block others
         wait_max_s:  give up and raise LeaseTimeout after this long
