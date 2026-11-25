@@ -97,10 +97,9 @@ export function useDashboardData(chartRange = '14d') {
       const days = RANGE_TO_DAYS[chartRange] ?? 14
       const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
 
-      const BASELINE_SINCE = '2026-11-17T18:30:00Z'
       const _apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
-      const [countRes, severityRes, topRiskRes, recentRes, exposureRes, remPkgRes, deltasRes] = await Promise.all([
+      const [countRes, severityRes, topRiskRes, recentRes, exposureRes, remPkgRes, deltasRes, baselinesRes] = await Promise.all([
         // 1. Total issue count (head=true means we only get the count, no rows)
         supabase.from('issues').select('*', { count: 'exact', head: true }),
 
@@ -142,9 +141,18 @@ export function useDashboardData(chartRange = '14d') {
         // 7. Dashboard deltas — moved into the parallel batch so we don't
         //    sequentially wait on it after the 6 above. Shaves ~2s off page
         //    load on prod where this is the slowest query.
-        fetch(`${_apiBase}/admin/dashboard-deltas/demo?since=${encodeURIComponent(BASELINE_SINCE)}`)
+        // Backend reads baseline_since from demo.dashboard_baselines itself,
+        // so we no longer pass it as a query param.
+        fetch(`${_apiBase}/admin/dashboard-deltas/demo`)
           .then(r => r.ok ? r.json() : { new_findings_since: 0, fixed_since: 0, ready_since: 0, validated_since: 0, avg_mttr: null })
           .catch(() => ({ new_findings_since: 0, fixed_since: 0, ready_since: 0, validated_since: 0, avg_mttr: null })),
+
+        // 8. Shared baselines from the DB (demo.dashboard_baselines).
+        //    Empty object means the migration hasn't been applied yet —
+        //    the hook falls back to the hardcoded defaults below.
+        fetch(`${_apiBase}/admin/dashboard-baselines/demo`)
+          .then(r => r.ok ? r.json() : {})
+          .catch(() => ({})),
       ])
 
       if (!mounted) return
@@ -224,19 +232,27 @@ export function useDashboardData(chartRange = '14d') {
           avgMttr = `${Math.round(avgHours)}h`
         }
       }
-      // Demo-narrative baselines: frozen "credible starting state" snapshotted
-      // 2026-11-17. Real activity after that moment is added on top via the
-      // /admin/dashboard-deltas/demo endpoint (fetched in the Promise.all above).
-      const BASELINE_TOTAL       = 11573
-      const BASELINE_REMEDIATED  = 8101  // 70% of baseline total
-      const BASELINE_REQUIRING   = 3472  // 30% of baseline total
-      const BASELINE_VALIDATED   = 7291  // 63% of baseline total
-      const BASELINE_READY       = 35
+      // Demo-narrative baselines: shared row in demo.dashboard_baselines so
+      // anyone with Supabase SQL access can tune them live without a
+      // frontend deploy. Hardcoded fallbacks are the historical values,
+      // used when the migration hasn't been applied yet or the fetch failed.
+      const b = baselinesRes || {}
+      const BASELINE_TOTAL       = b.baseline_total       ?? 11573
+      const BASELINE_REMEDIATED  = b.baseline_remediated  ?? 8101
+      const BASELINE_REQUIRING   = b.baseline_requiring   ?? 3472
+      const BASELINE_VALIDATED   = b.baseline_validated   ?? 7291
+      const BASELINE_READY       = b.baseline_ready       ?? 35
+      const MTTR_FALLBACK        = b.mttr_fallback        || '3d'
+      const CONF_FALLBACK        = b.avg_confidence_fallback ?? 89
 
       const deltas = deltasRes || { new_findings_since: 0, fixed_since: 0, ready_since: 0, validated_since: 0, avg_mttr: null }
 
       const demoRemediated       = BASELINE_REMEDIATED + (deltas.fixed_since || 0)
-      const demoRequiringAction  = BASELINE_REQUIRING + (deltas.new_findings_since || 0) - (deltas.fixed_since || 0)
+      // Subtraction model: Requiring Action is everything that isn't
+      // Remediated. Guarantees Requiring + Remediated = Risk Exposure
+      // and auto-absorbs rolled_back / fix_failed packages without needing
+      // a dedicated counter. See earlier walkthrough for math examples.
+      const demoRequiringAction  = Math.max(0, total - demoRemediated)
       const demoValidated        = BASELINE_VALIDATED + (deltas.validated_since || 0)
       const demoReadyToRemediate = BASELINE_READY + (deltas.ready_since || 0)
 
@@ -245,12 +261,12 @@ export function useDashboardData(chartRange = '14d') {
         requiringAction: demoRequiringAction,
         readyToRemediate: demoReadyToRemediate,
         validated: demoValidated,
-        avgConfidence: avgConfidence ?? 89,
+        avgConfidence: avgConfidence ?? CONF_FALLBACK,
         remediated: demoRemediated,
         // MTTR: prefer real value computed from recent fixed demo packages
         // (created_at → updated_at). Fall back to the old public-schema calc,
         // then to a credible baseline so the card is never empty.
-        avgMttr: deltas.avg_mttr || avgMttr || '3d',
+        avgMttr: deltas.avg_mttr || avgMttr || MTTR_FALLBACK,
         severityBreakdown,
         todayAdded,
         previousTotal: total - todayAdded,

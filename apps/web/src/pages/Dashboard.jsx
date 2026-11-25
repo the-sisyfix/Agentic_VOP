@@ -444,7 +444,12 @@ function RiskReduced({ chartData = [], timeRange = '14d', setTimeRange = () => {
             return (
               <div key={index} className="top-fix-item">
                 <span className="fix-indicator"></span>
-                <span className="fix-name">{fix.name}</span>
+                <span className="fix-name" title={fix.name}>
+                  {/* Strip the shared semgrep namespace "opt.vuln-labs.results."
+                      so the visible name is just the rule slug. Full raw name
+                      stays in the title tooltip. */}
+                  {fix.name.replace(/^opt\.vuln-labs\.results\./, '')}
+                </span>
                 <div className="fix-bar">
                   <div className="fix-bar-fill" style={{ width: `${pct}%` }}></div>
                 </div>

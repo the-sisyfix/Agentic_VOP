@@ -58,7 +58,20 @@ function mapTraceRow(row) {
 }
 
 export default function Agents() {
-  const [traceEvents, setTraceEvents] = useState([])
+  // Hydrate from localStorage so the Agents page renders instantly on
+  // revisits with the last-known trace events instead of flashing
+  // "Waiting for agent activity" during the 1-3s fetch.
+  const _cachedTraces = (() => {
+    try {
+      const raw = localStorage.getItem('sisyfix:agents-traces:v1')
+      if (!raw) return null
+      const c = JSON.parse(raw)
+      if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
+      return c.events || null
+    } catch { return null }
+  })()
+  const [traceEvents, setTraceEvents] = useState(_cachedTraces || [])
+  const [traceLoading, setTraceLoading] = useState(!_cachedTraces)
   const [runs, setRuns] = useState([])
   const [selectedAgent, setSelectedAgent] = useState('all')
   const [selectedEventType, setSelectedEventType] = useState('all')
@@ -145,7 +158,12 @@ export default function Agents() {
           if (!mounted) return
           // Sort DESC (newest first) to match real-mode display.
           allTraces.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-          setTraceEvents(allTraces.map(mapTraceRow))
+          const mapped = allTraces.map(mapTraceRow)
+          setTraceEvents(mapped)
+          setTraceLoading(false)
+          try {
+            localStorage.setItem('sisyfix:agents-traces:v1', JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
+          } catch { /* best-effort */ }
         } catch { /* transient network error, retry next tick */ }
       }
       poll()
@@ -164,7 +182,12 @@ export default function Agents() {
       .limit(200)
       .then(({ data, error }) => {
         if (!mounted || error || !data) return
-        setTraceEvents(data.map(mapTraceRow))
+        const mapped = data.map(mapTraceRow)
+        setTraceEvents(mapped)
+        setTraceLoading(false)
+        try {
+          localStorage.setItem('sisyfix:agents-traces:v1', JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
+        } catch { /* best-effort */ }
       })
 
     const traceChannel = supabase
@@ -647,6 +670,7 @@ export default function Agents() {
           <div className="agents-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <h1>Agents</h1>
+              <p className="agents-subtitle">Live trace of master and sub-agent collaboration across the pipeline</p>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {[
@@ -949,13 +973,23 @@ export default function Agents() {
 
               <div className="trace-stream">
                 {filteredEvents.length === 0 ? (
-                  <div className="trace-empty">
-                    <div className="trace-empty-title">Waiting for agent activity</div>
-                    <div className="trace-empty-sub">
-                      Once the master agent dispatches a task, every message and
-                      result will stream in here.
+                  traceLoading && traceEvents.length === 0 ? (
+                    // Skeleton rows while the first fetch is in flight — avoids
+                    // flashing "Waiting for agent activity" during cold loads.
+                    Array.from({ length: 8 }).map((_, i) => (
+                      <div key={`trace-skeleton-${i}`} style={{ padding: '10px 14px', borderBottom: '1px solid rgba(100,116,139,0.18)' }}>
+                        <span style={{ display: 'inline-block', height: 12, width: '92%', background: 'linear-gradient(90deg, rgba(100,116,139,0.12) 0%, rgba(148,163,184,0.22) 50%, rgba(100,116,139,0.12) 100%)', backgroundSize: '200% 100%', borderRadius: 4, animation: 'agents-skeleton-shimmer 1.4s ease-in-out infinite' }} />
+                      </div>
+                    ))
+                  ) : (
+                    <div className="trace-empty">
+                      <div className="trace-empty-title">Waiting for agent activity</div>
+                      <div className="trace-empty-sub">
+                        Once the master agent dispatches a task, every message and
+                        result will stream in here.
+                      </div>
                     </div>
-                  </div>
+                  )
                 ) : (
                   filteredEvents.map(ev => (
                     <div
