@@ -1,4 +1,4 @@
-# Ephemeral Remediation Playground: Design
+﻿# Ephemeral Remediation Playground: Design
 
 Status: DRAFT for team review. No code has been changed.
 Scope of work: dev Supabase project and the current feature branch only.
@@ -541,3 +541,71 @@ IP with no ingress; a private subnet would need VPC endpoints or NAT), and the s
    - The scan-server endpoints use public IPs (`35.173.249.140` for env1,
      `18.213.193.246` for env4). The workflow notes that the public IP changes after a stop and
      start.
+
+### 18a. CSPM apply/destroy measurement and decisions (executed)
+
+Method: ran in a temporary directory on idle dev env3 (no processes, load 0.00 before starting),
+copying `main.tf.original` with prefix `spike-apply1` and its own state key. No file under
+`/opt/vuln-labs` and no env3 state object was touched. All resources were destroyed in the same
+script, the spike state object and its lock entry were removed, and a verification from the CLI
+afterwards found no remaining spike resources.
+
+| Step | Time |
+|---|---|
+| `terraform init` (plugin cache copied) | 11 s |
+| `terraform apply` (8 resources) | 34 s |
+| `terraform destroy` | 9 s |
+
+Conclusions:
+- The CSPM lab is not a boot-time problem. About 45 s to create and 9 s to destroy. The decision
+  "apply cloud labs lazily, only when the run needs them" is still right for cost and exposure, but
+  it is no longer needed for speed.
+- Unique-prefix creation and teardown work end to end with the existing lab role. The bucket had
+  Block Public Access enabled by default and no bucket policy.
+- One KMS key now sits in 7-day pending deletion (`deletion_window_in_days = 7` in the template).
+  Five keys with the lab description are already pending from earlier resets, so every create and
+  destroy cycle leaves a pending key. This is a cost and noise item, not an exposure.
+- The lab role cannot call `iam:ListPolicies`, so a teardown verifier needs to look resources up by
+  exact name, not by listing.
+- I did not apply the serverless lab (see 18b).
+
+### 18b. Security finding: the existing serverless lab is exploitable (DEFERRED, tracked as KG-1 in docs/known-gaps.md)
+
+Read-only checks on the live account confirmed that env1, env2 and env3 each run the serverless lab
+as written in `serverless-lab-template.tf`:
+
+- The Lambda role trust policy is `Principal: {"AWS": "*"}` and the role has a policy attached with
+  `Action: "*"` on `Resource: "*"` (admin).
+- Each Lambda has a public Function URL with `AuthType: NONE`.
+- The handler's `/process` route runs `pickle.loads` on the request body, and `/execute` calls
+  `os.system` with a request parameter [Verified in `lambda_function.py`].
+- Role names are predictable (`serverless-lab-vop-vuln-lab-env{1,2,3}-role`) and the account id
+  appears in resource names in this repo.
+
+Consequence: an unauthenticated caller who can reach those URLs can run code with admin
+credentials in account 486655355038, which also hosts the PROD app. Separately, any AWS principal
+that is allowed `sts:AssumeRole` in its own account can assume the role. I have not tested either
+path (no exploitation attempted); the configuration above is what I verified.
+
+This is existing infrastructure, not part of the new design, but it affects the design directly:
+- The ephemeral playground must not apply this lab as written, and must never apply it in the
+  PROD-hosting account. This strengthens the case for the separate sandbox account.
+- For serverless findings, the Phase 1 proof should be static (plan, Checkov and Semgrep re-scan,
+  unit test of the handler) and the replica should not deploy a public URL or a wildcard-trust role.
+- The deployed copies in env1/env2/env3 should be restricted regardless of this project. Options
+  that keep the scanners working (they scan source files, not the URL): delete the Function URL,
+  set reserved concurrency to 0, or change the trust principal. Any of these is a change to
+  existing resources, so none was made.
+
+### 18c. Added to scope (decided)
+
+1. Fix `POST /agents/runs/{run_id}/cancel`. It deletes every `issues` and `raw_findings` row for
+   the run's scanners and resets the scanner watermark, so cancelling one run removes other users'
+   data. It must delete only rows whose `agent_run_id` equals the cancelled run. [Verified in code]
+   Pitfall to check in Stage 3: other rows reference `raw_findings`/`issues` (packages, fix runs),
+   so the delete order and foreign keys need review.
+2. The `trivy-os-al2-ec2` registry value `target_instance_id = i-0e374829ec5fc880c` refers to an old
+   env5 instance that no longer exists (confirmed by the owner). The current env5 instance in this
+   account is `i-0cf480a449cff16a8`. Correcting it is a database update. The rows are in the dev
+   database (confirmed by the owner). No update has been made yet; it is part of the implementation.
+
