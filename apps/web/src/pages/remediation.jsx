@@ -961,8 +961,8 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                       color: '#f1f5f9',
                     }}
                   >
-                    <span title="Plan confidence — SA-3's score (0-100) across 5 factors: deterministic fix, blast radius, test coverage, rollback availability, environmental uncertainty">
-                      Plan confidence
+                    <span title="SA-3 confidence score (0-100) across 5 factors: deterministic fix, blast radius, test coverage, rollback availability, environmental uncertainty">
+                      Confidence
                     </span>
                     <span
                       className="rmp-conf-num"
