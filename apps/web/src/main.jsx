@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
+import RouteTitle from "./components/RouteTitle";
 
 // Auth pages
 import Login from "./pages/Login.jsx";
@@ -41,6 +42,7 @@ import "./styles/responsive.css";
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <BrowserRouter>
+      <RouteTitle />
       <AuthProvider>
         <Routes>
           {/* Public routes */}
