@@ -99,17 +99,21 @@ function recommendedPathway(pkg) {
 }
 
 export default function Remediation() {
-  // Hydrate packages from localStorage so the Remediation page paints
-  // instantly on revisits (same pattern as Issues/Assets/Validation).
-  const _cachedPkgs = (() => {
+  // Pipeline mode is what makes the data source differ (real vs demo).
+  // Keep caches keyed per-mode so switching modes never shows the other
+  // mode's packages even for the brief window before the new fetch lands.
+  const _initialMode = localStorage.getItem('pipelineMode') || 'real'
+  const _cacheKey = (mode) => `sisyfix:remediation:${mode}:v1`
+  const _loadCachedPkgs = (mode) => {
     try {
-      const raw = localStorage.getItem('sisyfix:remediation:v1')
+      const raw = localStorage.getItem(_cacheKey(mode))
       if (!raw) return null
       const c = JSON.parse(raw)
       if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
       return c.pkgs || null
     } catch { return null }
-  })()
+  }
+  const _cachedPkgs = _loadCachedPkgs(_initialMode)
   const [packages, setPackages] = useState(_cachedPkgs || [])
   const [loading, setLoading] = useState(!_cachedPkgs)
   const [error, setError] = useState(null)
@@ -145,6 +149,16 @@ export default function Remediation() {
     }
   }, [])
 
+  // When mode toggles, immediately swap the displayed packages to whatever
+  // is cached for the NEW mode (or empty + loading if nothing cached yet).
+  // Stops the old mode's data from flashing before the new fetch lands.
+  useEffect(() => {
+    const next = _loadCachedPkgs(pipelineMode)
+    setPackages(next || [])
+    setLoading(!next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineMode])
+
   const isDemo = pipelineMode === 'demo'
   const apiBase = isDemo
     ? `${API_URL}/admin/remediation-packages/demo`
@@ -176,7 +190,7 @@ export default function Remediation() {
       const pkgs = data.packages || []
       setPackages(pkgs)
       try {
-        localStorage.setItem('sisyfix:remediation:v1', JSON.stringify({ ts: Date.now(), pkgs }))
+        localStorage.setItem(_cacheKey(pipelineMode), JSON.stringify({ ts: Date.now(), pkgs }))
       } catch { /* best-effort */ }
     } catch (e) {
       setError(e.message || 'Failed to load packages')
@@ -519,7 +533,7 @@ export default function Remediation() {
                     <th>ID</th>
                     <th>Finding</th>
                     <th>Scanner</th>
-                    <th>Family</th>
+                    <th>Type</th>
                     <th>Confidence</th>
                     <th>Validation</th>
                     <th>Approval</th>
@@ -540,7 +554,7 @@ export default function Remediation() {
                         <td>#{p.id}</td>
                         <td className="rmp-finding-cell">{p.finding || '—'}</td>
                         <td><span className="rmp-family-chip">{formatScannerName(p.source) || '—'}</span></td>
-                        <td><span className="rmp-family-chip">{FAMILY_LABEL[p.family] || p.family}</span></td>
+                        <td><span className="rmp-family-chip" title={`${FAMILY_LABEL[p.family] || p.family || '—'} · ${p.asset_name || '—'}`}>{p.asset_type || '—'}</span></td>
                         <td>
                           <ConfidenceCell pkg={p} apiBase={apiBase} />
                         </td>
@@ -573,14 +587,17 @@ export default function Remediation() {
                   Showing {displayTotal === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, displayTotal)} of {displayTotal} packages
                 </span>
                 <div className="issues-pagination">
-                  <button
-                    className={`pagination-btn ${handyFilter ? 'active' : ''}`}
-                    onClick={() => setHandyFilter(f => !f)}
-                    title="Show pre-run demo packages (handy for live walkthroughs)"
-                    style={{ fontWeight: 600, marginRight: 8 }}
-                  >
-                    #
-                  </button>
+                  {/* "#" pill is demo-only — hide on Real Pipeline. */}
+                  {isDemo && (
+                    <button
+                      className={`pagination-btn ${handyFilter ? 'active' : ''}`}
+                      onClick={() => setHandyFilter(f => !f)}
+                      title="Show pre-run demo packages (handy for live walkthroughs)"
+                      style={{ fontWeight: 600, marginRight: 8 }}
+                    >
+                      #
+                    </button>
+                  )}
 
                   {totalPages > 1 && (
                     <>

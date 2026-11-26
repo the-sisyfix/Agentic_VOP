@@ -1989,12 +1989,27 @@ def list_demo_remediation_packages(
         )
         issue_by_id = {r["id"]: r for r in issue_rows}
         asset_rows = (
-            sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
+            sb.table("assets").select("name,aliases,hostname,ip_address,asset_type").execute().data
+            or []
         )
+
+        # Build a name → asset_type lookup so the UI can show the asset's
+        # category (application / infrastructure / service / ...) alongside
+        # its name, without a second round-trip per row.
+        type_by_name: dict[str, str] = {}
+        for ar in asset_rows:
+            at = ar.get("asset_type")
+            if not at:
+                continue
+            if ar.get("name"):
+                type_by_name[ar["name"]] = at
+            for alias in ar.get("aliases") or []:
+                type_by_name[alias] = at
 
         for pkg in packages:
             iss = issue_by_id.get(pkg.get("issue_id")) or {}
             pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, asset_rows)
+            pkg["asset_type"] = type_by_name.get(pkg["asset_name"])
             pkg["public_issue_id"] = iss.get("public_issue_id")
             pkg["source"] = iss.get("source")
 
