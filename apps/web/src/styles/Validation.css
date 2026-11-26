@@ -16,13 +16,19 @@
   flex: 1;
   padding: 24px 32px;
   background: #0B0F19;
-  overflow-y: auto;
   height: 100%;
+  /* Flex column so the page header + card header + card footer stay pinned
+   * and only the table body scrolls. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
-/* Header */
+/* Header — pinned above the table */
 .validation-header {
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 .validation-header h1 {
@@ -38,12 +44,21 @@
   margin: 0;
 }
 
-/* Main Card */
+/* Main Card — fills remaining vertical space. */
 .validation-card {
   background: #151C2C;
   border: 1px solid #1E293B;
   border-radius: 12px;
   overflow: hidden;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.validation-card > .validation-filters,
+.validation-card > .validation-footer {
+  flex-shrink: 0;
 }
 
 /* Filters Section */
@@ -125,10 +140,12 @@
   color: #64748B;
 }
 
-/* Table Container */
+/* Table Container — the ONLY scrollable region inside the card. */
 .validation-table-container {
+  flex: 1;
   overflow-x: auto;
-  min-height: 400px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 /* Table */
@@ -139,7 +156,11 @@
   table-layout: auto;
 }
 
+/* Sticky header so column titles stay visible while rows scroll. */
 .validation-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   background: #1B2336;
 }
 

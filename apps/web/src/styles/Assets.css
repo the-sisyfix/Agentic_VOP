@@ -16,18 +16,25 @@
   flex: 1;
   padding: 24px 32px;
   background: #0B0F19;
-  overflow-y: auto;
   height: 100%;
   transition: margin-right 0.3s ease;
+  /* Flex column pins the page header and lets the card consume the rest.
+   * `overflow: hidden` + `min-height: 0` are what make the inner table
+   * (not the whole page) the only thing that scrolls. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .assets-main.with-panel {
   margin-right: 380px;
 }
 
-/* Header */
+/* Header — stays pinned above the table */
 .assets-header {
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 .assets-header h1 {
@@ -43,12 +50,22 @@
   margin: 0;
 }
 
-/* Main Card */
+/* Main Card — fills remaining vertical space.
+ * Filters top (fixed), table middle (scrolls), pagination bottom (fixed). */
 .assets-card {
   background: #151C2C;
   border: 1px solid #1E293B;
   border-radius: 12px;
   overflow: hidden;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.assets-card > .assets-filters,
+.assets-card > .assets-footer {
+  flex-shrink: 0;
 }
 
 /* Filters Section */
@@ -184,10 +201,12 @@
   border-color: #3D4A5C;
 }
 
-/* Table Container */
+/* Table Container — the ONLY scrollable region inside the card. */
 .assets-table-container {
+  flex: 1;
   overflow-x: auto;
-  min-height: 400px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 /* Table */
@@ -197,8 +216,12 @@
   font-size: 13px;
 }
 
+/* Sticky header so column titles stay visible while rows scroll. */
 .assets-table thead {
   background: #1B2336;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .assets-table th {
