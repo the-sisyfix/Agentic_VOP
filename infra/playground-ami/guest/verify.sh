@@ -31,6 +31,8 @@ check "serverless lab NOT present"     test ! -d /opt/vuln-labs/serverless-lab
 check "no .bak files in labs"          bash -c '[ -z "$(find /opt/vuln-labs -name "*.bak-*" 2>/dev/null)" ]'
 
 echo "== services and tools"
+# A fresh clone may still be starting services when SSM first comes online. Wait up to 90 s.
+for _ in $(seq 1 18); do systemctl is-active --quiet docker && break; sleep 5; done
 check "docker daemon active"           systemctl is-active docker
 check "ssm agent active"               bash -c 'systemctl is-active snap.amazon-ssm-agent.amazon-ssm-agent.service || systemctl is-active amazon-ssm-agent'
 check "unattended-upgrades disabled"   bash -c '! systemctl is-enabled unattended-upgrades 2>/dev/null | grep -q enabled'
