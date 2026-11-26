@@ -447,14 +447,29 @@
   }
 }
 
-/* Top Risk Drivers Card */
+/* Top Risk Drivers Card — flex so the body stretches to match the Risk
+   Reduced card next to it (grid stretches the card, flex pushes content). */
+.risk-drivers-card {
+  display: flex;
+  flex-direction: column;
+}
 .risk-table-body {
-  max-height: 240px;
   overflow-y: auto;
 }
 
+/* The inner wrapper flexes to fill whatever height the grid cell gives us,
+   so Top Risk Drivers matches Risk Reduced's height. The scrollbar kicks in
+   when there are more rows than fit the reserved space. Fixed max-height so
+   extra risk-driver rows don't push this card taller than Risk Reduced. */
+.risk-drivers-table {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 .risk-table-wrapper {
-  max-height: 300px;
+  flex: 1;
+  max-height: 360px;
   overflow-y: auto;
 }
 
@@ -463,6 +478,8 @@
   border: 1px solid var(--dash-border);
   border-radius: var(--dash-radius-lg);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .risk-drivers-header {

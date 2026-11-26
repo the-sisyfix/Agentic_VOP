@@ -1760,8 +1760,37 @@ def demo_dashboard_top_fixes(since: str, limit: int = 5) -> dict:
     return {"since": since, "fixes": fixes}
 
 
+@app.get("/admin/dashboard-baselines/demo")
+def demo_dashboard_baselines() -> dict:
+    """Return the shared baseline row for the Dashboard cards.
+
+    Baselines live in demo.dashboard_baselines (single-row table from
+    migration 0047). Anyone with Supabase SQL access can tune them live.
+    Hook falls back to hardcoded defaults if the fetch fails, so a missing
+    table never blocks the dashboard from loading.
+    """
+    sb = supabase_admin_demo()
+    try:
+        rows = sb.table("dashboard_baselines").select("*").limit(1).execute().data or []
+        if rows:
+            r = rows[0]
+            return {
+                "baseline_since": r.get("baseline_since"),
+                "baseline_total": r.get("baseline_total"),
+                "baseline_remediated": r.get("baseline_remediated"),
+                "baseline_requiring": r.get("baseline_requiring"),
+                "baseline_validated": r.get("baseline_validated"),
+                "baseline_ready": r.get("baseline_ready"),
+                "mttr_fallback": r.get("mttr_fallback") or "3d",
+                "avg_confidence_fallback": r.get("avg_confidence_fallback") or 89,
+            }
+    except Exception:  # noqa: BLE001, S110
+        pass
+    return {}
+
+
 @app.get("/admin/dashboard-deltas/demo")
-def demo_dashboard_deltas(since: str) -> dict:
+def demo_dashboard_deltas(since: str | None = None) -> dict:
     """Return small, fast deltas for the Dashboard cards since a baseline timestamp.
 
     Powers the baseline + real-activity model: the UI hardcodes credible
@@ -1774,6 +1803,22 @@ def demo_dashboard_deltas(since: str) -> dict:
     jsonb-arrow filter that times out on the full table.
     """
     sb = supabase_admin_demo()
+
+    # If the caller didn't pass `since`, read the shared baseline from the
+    # demo.dashboard_baselines table. Fallback to the historical hardcoded
+    # value so the endpoint still works when the migration isn't applied yet.
+    if not since:
+        try:
+            rows = (
+                sb.table("dashboard_baselines").select("baseline_since").limit(1).execute().data
+                or []
+            )
+            if rows and rows[0].get("baseline_since"):
+                since = rows[0]["baseline_since"]
+        except Exception:  # noqa: BLE001, S110
+            pass
+        if not since:
+            since = "2026-11-17T18:30:00Z"
 
     def _safe_count(builder) -> int:
         try:
@@ -1944,12 +1989,27 @@ def list_demo_remediation_packages(
         )
         issue_by_id = {r["id"]: r for r in issue_rows}
         asset_rows = (
-            sb.table("assets").select("name,aliases,hostname,ip_address").execute().data or []
+            sb.table("assets").select("name,aliases,hostname,ip_address,asset_type").execute().data
+            or []
         )
+
+        # Build a name → asset_type lookup so the UI can show the asset's
+        # category (application / infrastructure / service / ...) alongside
+        # its name, without a second round-trip per row.
+        type_by_name: dict[str, str] = {}
+        for ar in asset_rows:
+            at = ar.get("asset_type")
+            if not at:
+                continue
+            if ar.get("name"):
+                type_by_name[ar["name"]] = at
+            for alias in ar.get("aliases") or []:
+                type_by_name[alias] = at
 
         for pkg in packages:
             iss = issue_by_id.get(pkg.get("issue_id")) or {}
             pkg["asset_name"] = _resolve_asset_for_demo_issue(iss, asset_rows)
+            pkg["asset_type"] = type_by_name.get(pkg["asset_name"])
             pkg["public_issue_id"] = iss.get("public_issue_id")
             pkg["source"] = iss.get("source")
 
@@ -3033,6 +3093,8 @@ class ScannerConfig(BaseModel):
     last_fetched_at: str | None
     # metadata minus connector_type, surfaced separately for the UI
     metadata: dict
+    rate_limit_rpm: int | None = None
+    timeout_sec: int | None = None
 
 
 class ScannersResponse(BaseModel):
@@ -3047,6 +3109,10 @@ class ScannerUpdate(BaseModel):
     # Sparse metadata merge: keys present here override matching keys in the
     # existing row's metadata jsonb; absent keys stay untouched.
     metadata: dict | None = None
+    protocol: str | None = None
+    auth_type: str | None = None
+    rate_limit_rpm: int | None = None
+    timeout_sec: int | None = None
 
 
 class ScannerCreate(BaseModel):
@@ -3063,6 +3129,8 @@ class ScannerCreate(BaseModel):
     auth_type: str = "custom"
     metadata: dict = Field(default_factory=dict)
     enabled: bool = True
+    rate_limit_rpm: int | None = None
+    timeout_sec: int | None = None
 
 
 _VALID_CONNECTOR_TYPES = (
@@ -3106,6 +3174,8 @@ def _row_to_scanner_config(row: dict) -> ScannerConfig:
         connector_type=metadata.get("connector_type"),
         last_fetched_at=row.get("last_fetched_at"),
         metadata={k: v for k, v in safe_metadata.items() if k != "connector_type"},
+        rate_limit_rpm=row.get("rate_limit_rpm"),
+        timeout_sec=row.get("timeout_sec"),
     )
 
 
@@ -3179,6 +3249,28 @@ def update_scanner(tool: str, body: ScannerUpdate) -> ScannerConfig:
         merged = encrypt_sensitive_fields(merged)
         update_payload["metadata"] = merged
 
+    # Top-level column updates for the newly exposed fields. Protocol and
+    # auth_type are validated against short allowlists so we don't accept
+    # anything the fetchers can't interpret.
+    if body.protocol is not None:
+        p = body.protocol.strip().upper()
+        if p not in {"REST", "GRAPHQL", "S3", "SSM", "GIT", "FILE"}:
+            raise HTTPException(status_code=400, detail=f"unknown protocol: {p}")
+        update_payload["protocol"] = p
+    if body.auth_type is not None:
+        a = body.auth_type.strip().lower()
+        if a not in {"none", "api_key", "bearer", "basic", "oauth", "custom"}:
+            raise HTTPException(status_code=400, detail=f"unknown auth_type: {a}")
+        update_payload["auth_type"] = a
+    if body.rate_limit_rpm is not None:
+        if body.rate_limit_rpm < 0 or body.rate_limit_rpm > 100_000:
+            raise HTTPException(status_code=400, detail="rate_limit_rpm out of range")
+        update_payload["rate_limit_rpm"] = body.rate_limit_rpm
+    if body.timeout_sec is not None:
+        if body.timeout_sec < 1 or body.timeout_sec > 600:
+            raise HTTPException(status_code=400, detail="timeout_sec must be 1..600")
+        update_payload["timeout_sec"] = body.timeout_sec
+
     if not update_payload:
         # No-op — return the current row as-is.
         return _row_to_scanner_config(current)
@@ -3242,6 +3334,10 @@ def create_scanner(body: ScannerCreate) -> ScannerConfig:
         "metadata": merged_metadata,
         "enabled": body.enabled,
     }
+    if body.rate_limit_rpm is not None:
+        row["rate_limit_rpm"] = body.rate_limit_rpm
+    if body.timeout_sec is not None:
+        row["timeout_sec"] = body.timeout_sec
 
     inserted = sb.table("connection_registry").insert(row).execute().data
     if not inserted:
