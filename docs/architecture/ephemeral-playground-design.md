@@ -609,3 +609,35 @@ This is existing infrastructure, not part of the new design, but it affects the 
    account is `i-0cf480a449cff16a8`. Correcting it is a database update. The rows are in the dev
    database (confirmed by the owner). No update has been made yet; it is part of the implementation.
 
+
+### 18d. Stage 1 result: golden AMI built and verified
+
+Code: `infra/playground-ami/` (build script, guest scripts, README). New repo files only. No existing
+file, instance or application code was changed. Image Dockerfiles for the infra, java and python
+labs were added under `infra/vuln-labs/` (previously only inside `user-data.sh.tpl`).
+
+| Item | Result |
+|---|---|
+| AMI | `ami-0aaa6e8f6957ca050`, profile `ubuntu2004-labs`, built from pinned commit `465a53b3`, tagged with commit and base AMI |
+| Published to | SSM parameter `/sisyfix/dev/playground/ami/ubuntu2004-labs/latest` (data type `aws:ec2:image`) |
+| Base | Same frozen Ubuntu 20.04 AMI as env1/env2/env3 (`ami-0dba2cb6798deb6d8`) |
+| Root volume | 20 GB. Image uses 5 GB, 15 GB free, so 20 GB is enough (env3's 13 GB used was accumulated run leftovers) |
+| Bake time | About 6.5 minutes. AMI snapshot about 10.5 minutes. Total about 17 minutes, one-off |
+| Clone ready | SSM Online 44 to 46 seconds after launch |
+| Verification | 35 of 35 checks pass on a fresh clone: labs present, no `.bak` files, no pre-rendered `main.tf`, serverless lab absent, tools and four images present, docker/SSM running, semgrep parses the extracted rules, trivy scans the appsec lab, activation renders a unique prefix and state key, `terraform plan` shows 8 resources to add, activation refuses a second prefix |
+| Cleanup | Builder, clones and security groups deleted. No state objects written. All six existing instances untouched |
+
+Decisions this confirmed or changed:
+- The four Docker images (including the pinned `openssl` infra lab and the EOL Debian buster
+  images) still build today. The rebuild risk noted earlier did not materialize at this commit.
+- The CSPM lab is not applied at bake. `activate.sh` renders it per lease. Applying it took
+  about 45 s in the earlier measurement (18a), so a lease can apply it at start.
+- Rule files for re-scans are extracted from `scan-server.py` at the pinned commit, so they match
+  the scan source (17 semgrep rules and 19 serverless rules).
+- SSM returns only the first 24,000 characters of command output. The bake therefore logs to a file
+  on the instance and the builder confirms success with a second command. The same limit applies to
+  the fixer's own commands (see KG-5).
+
+Not done in Stage 1 (by design): the lease table, provider, target resolver, guard/lock changes,
+teardown, and the Amazon Linux OS profile. The builder used the existing env3 instance profile; per
+lease scoped profiles belong to Stage 5.
