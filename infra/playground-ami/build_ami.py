@@ -203,10 +203,13 @@ def cmd_build(a: argparse.Namespace) -> int:
         t0 = time.time()
         status, out, err = aws.run_script(iid, script, timeout=a.bake_timeout)
         log(f"bake finished: status={status} in {time.time() - t0:.0f}s")
-        print(out[-6000:])
+        print(out[:8000])
         if err.strip():
-            print("--- stderr (tail) ---\n" + err[-2500:])
-        if status != "Success" or "BAKE_OK" not in out:
+            print("--- stderr (head) ---\n" + err[:2500])
+        # Do not trust truncated SSM output: ask the instance whether the bake completed.
+        s2, o2, _ = aws.run_script(iid, "grep -c 'BAKE_OK' /var/log/playground-bake.log; test -f /opt/playground/MANIFEST.json && echo MANIFEST_PRESENT", timeout=60)
+        baked = s2 == "Success" and "MANIFEST_PRESENT" in o2 and o2.split()[0] != "0"
+        if status != "Success" or not baked:
             if a.keep_builder:
                 log(f"BAKE FAILED. Builder {iid} and its security group were left in place (--keep-builder). Delete them when done.")
             else:

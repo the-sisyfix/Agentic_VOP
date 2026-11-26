@@ -34,7 +34,14 @@ TRIVY_VERSION="v0.76.2"
 SEMGREP_VERSION="1.99.0"
 CHECKOV_VERSION="3.2.477"
 
-log() { echo "[bake $(date -u +%H:%M:%S)] $*"; }
+# SSM returns only the FIRST ~24,000 characters of output, and apt/pip/docker are noisy.
+# So: all command output goes to a log file on the instance; only log() lines (and a
+# failure tail) reach SSM through fd 3. build_ami.py confirms success separately.
+LOGF=/var/log/playground-bake.log
+exec 3>&1
+exec >>"$LOGF" 2>&1
+log() { local m="[bake $(date -u +%H:%M:%S)] $*"; echo "$m" >&3; echo "$m"; }
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "[bake] FAILED rc=$rc. Last 60 log lines:" >&3; tail -60 "$LOGF" >&3; fi' EXIT
 retry() { local n=$1; shift; local i; for i in $(seq 1 "$n"); do "$@" && return 0; log "retry $i/$n failed: $*"; sleep 10; done; return 1; }
 fetch() { retry 3 curl -fsSL "$1" -o "$2"; }
 
@@ -144,7 +151,7 @@ rm -rf "$TMP_TF"
 log "semgrep rule files (extracted from scan-server.py)"
 mkdir -p /opt/vuln-labs/results
 fetch "${LABS_RAW}/scan-server.py" /tmp/scan-server.py
-python3 - <<'PY'
+python3 - >&3 <<'PY'
 import ast
 import re
 import sys
@@ -212,7 +219,7 @@ if [ "${FREE_GB}" -lt "${MIN_FREE_GB}" ]; then
   exit 1
 fi
 
-python3 - <<PY
+python3 - >&3 <<PY
 import json, subprocess, datetime
 def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
 manifest = {
