@@ -58,18 +58,21 @@ function mapTraceRow(row) {
 }
 
 export default function Agents() {
-  // Hydrate from localStorage so the Agents page renders instantly on
-  // revisits with the last-known trace events instead of flashing
-  // "Waiting for agent activity" during the 1-3s fetch.
-  const _cachedTraces = (() => {
+  // Trace events are per-pipeline-mode (real vs demo). Keep caches keyed
+  // per mode so toggling never shows the other mode's traces during the
+  // brief window before the new fetch lands.
+  const _initialMode = localStorage.getItem('pipelineMode') || 'real'
+  const _traceCacheKey = (mode) => `sisyfix:agents-traces:${mode}:v1`
+  const _loadCachedTraces = (mode) => {
     try {
-      const raw = localStorage.getItem('sisyfix:agents-traces:v1')
+      const raw = localStorage.getItem(_traceCacheKey(mode))
       if (!raw) return null
       const c = JSON.parse(raw)
       if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
       return c.events || null
     } catch { return null }
-  })()
+  }
+  const _cachedTraces = _loadCachedTraces(_initialMode)
   const [traceEvents, setTraceEvents] = useState(_cachedTraces || [])
   const [traceLoading, setTraceLoading] = useState(!_cachedTraces)
   const [runs, setRuns] = useState([])
@@ -126,6 +129,16 @@ export default function Agents() {
     }
   }, [])
 
+  // Swap displayed traces to the NEW mode's cache (or empty+loading) the
+  // moment the toggle flips. Stops cross-mode trace flash before the new
+  // fetch completes.
+  useEffect(() => {
+    const next = _loadCachedTraces(pipelineMode)
+    setTraceEvents(next || [])
+    setTraceLoading(!next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineMode])
+
   useEffect(() => {
     let mounted = true
 
@@ -162,7 +175,7 @@ export default function Agents() {
           setTraceEvents(mapped)
           setTraceLoading(false)
           try {
-            localStorage.setItem('sisyfix:agents-traces:v1', JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
+            localStorage.setItem(_traceCacheKey(pipelineMode), JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
           } catch { /* best-effort */ }
         } catch { /* transient network error, retry next tick */ }
       }
@@ -186,7 +199,7 @@ export default function Agents() {
         setTraceEvents(mapped)
         setTraceLoading(false)
         try {
-          localStorage.setItem('sisyfix:agents-traces:v1', JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
+          localStorage.setItem(_traceCacheKey(pipelineMode), JSON.stringify({ ts: Date.now(), events: mapped.slice(0, 500) }))
         } catch { /* best-effort */ }
       })
 
@@ -391,11 +404,15 @@ export default function Agents() {
       return events[events.length - 1] || null
     }
 
-    const masterEvent = lastEventFor('master')
-    const sub1Event = lastEventFor('sub-agent-1')
-    const sub2Event = lastEventFor('sub-agent-2')
-    const sub3Event = lastEventFor('sub-agent-3')
-    const sub4Event = lastEventFor('sub-agent-4')
+    // Only show the current task when the agent is actively working in a
+    // run that's still in progress. Otherwise the card would keep showing
+    // the stale last message long after the run finished, making it look
+    // like something's happening when it isn't.
+    const liveTask = (agentName) => {
+      if (!isActiveInRun(agentName)) return null
+      const ev = lastEventFor(agentName)
+      return stripEc2(ev?.message) || null
+    }
 
     return [
       {
@@ -403,35 +420,35 @@ export default function Agents() {
         name: 'Master Orchestrator',
         role: 'master',
         status: isActiveInRun('master') ? 'working' : 'idle',
-        currentTask: stripEc2(masterEvent?.message) || null,
+        currentTask: liveTask('master'),
       },
       {
         id: 'sub-agent-1',
         name: 'Sub-Agent 1 — Smart Connector',
         role: 'sub',
         status: isActiveInRun('sub-agent-1') ? 'working' : 'idle',
-        currentTask: stripEc2(sub1Event?.message) || null,
+        currentTask: liveTask('sub-agent-1'),
       },
       {
         id: 'sub-agent-2',
         name: 'Sub-Agent 2 — Enrichment Specialist',
         role: 'sub',
         status: isActiveInRun('sub-agent-2') ? 'working' : 'idle',
-        currentTask: stripEc2(sub2Event?.message) || null,
+        currentTask: liveTask('sub-agent-2'),
       },
       {
         id: 'sub-agent-3',
         name: 'Sub-Agent 3 — Remediation Planner',
         role: 'sub',
         status: isActiveInRun('sub-agent-3') ? 'working' : 'idle',
-        currentTask: stripEc2(sub3Event?.message) || null,
+        currentTask: liveTask('sub-agent-3'),
       },
       {
         id: 'sub-agent-4',
         name: 'Sub-Agent 4 — Fixer',
         role: 'sub',
         status: isActiveInRun('sub-agent-4') ? 'working' : 'idle',
-        currentTask: stripEc2(sub4Event?.message) || null,
+        currentTask: liveTask('sub-agent-4'),
       },
     ]
   }, [runs, traceEvents])

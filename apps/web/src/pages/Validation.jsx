@@ -26,7 +26,8 @@ const validationColumns = [
 function getStatusClass(status) {
   if (status === 'Validated') return 'validated'
   if (status === 'Failed') return 'failed'
-  if (status === 'Action Needed') return 'action-needed'
+  // Partial reuses the existing "action-needed" pill styling (amber).
+  if (status === 'Partial' || status === 'Action Needed') return 'action-needed'
   if (status === 'Closed') return 'closed'
   return 'pending'
 }
@@ -59,8 +60,8 @@ function getStatusExplanation(status, item) {
   if (status === 'Failed') {
     return `Validation failed: ${item.evidence?.description || 'The remediation did not pass verification tests.'}`
   }
-  if (status === 'Action Needed') {
-    return `Action required: ${item.evidence?.description || 'Manual intervention needed.'}`
+  if (status === 'Partial' || status === 'Action Needed') {
+    return `Partial — ${item.evidence?.description || 'Some validation checks passed but at least one is incomplete.'}`
   }
   return null
 }
@@ -314,10 +315,16 @@ export default function Validation() {
           const pw = pkg.pathways?.[pwIdx] || pkg.pathways?.[0]
           const vm = pw?.validation_metadata
 
-          // Determine validation status from package data
+          // Determine validation status from package data.
+          // Mapping mirrors the Remediation page's VALIDATION_LABEL so both
+          // surfaces show the same word for the same underlying state.
+          //   validated | proven  -> "Validated"
+          //   partial  | unverified -> "Partial"
+          //   unvalidated        -> "Failed"
+          //   null (no metadata) -> "Pending"
           let status = 'Pending'
-          if (vm?.status === 'validated') status = 'Validated'
-          else if (vm?.status === 'partial') status = 'Action Needed'
+          if (vm?.status === 'validated' || vm?.status === 'proven') status = 'Validated'
+          else if (vm?.status === 'partial' || vm?.status === 'unverified') status = 'Partial'
           else if (vm?.status === 'unvalidated') status = 'Failed'
           else if (pkg.status === 'ready_for_execution') status = 'Validated'
           else if (pkg.status === 'rejected') status = 'Failed'
@@ -423,7 +430,7 @@ export default function Validation() {
   const getValidationClass = (status) => {
     if (status === 'Validated') return 'validated'
     if (status === 'Failed') return 'failed'
-    if (status === 'Action Needed') return 'action-needed'
+    if (status === 'Partial' || status === 'Action Needed') return 'action-needed'
     if (status === 'Closed') return 'closed'
     return 'pending'
   }
