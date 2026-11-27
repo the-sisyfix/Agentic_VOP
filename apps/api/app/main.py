@@ -1862,13 +1862,40 @@ def demo_dashboard_deltas(since: str | None = None) -> dict:
         except Exception:
             return 0
 
-    # Remediated delta — packages fixed since baseline
-    fixed_since = _safe_count(
+    # Remediated delta — ISSUES fixed since baseline, not packages.
+    # Risk Exposure counts issue rows, so Remediated must count issues too
+    # or the dashboard invariant (Requiring + Remediated = Risk Exposure)
+    # drifts whenever the planner groups N same-CVE issues into one package.
+    # Use demo.issues.raw_duplicate_count (migration 0046) to expand each
+    # fixed package back to the raw-finding count it actually resolved.
+    fixed_pkg_rows = (
         sb.table("remediation_packages")
-        .select("id", count="exact", head=True)
+        .select("issue_id")
         .eq("status", "fixed")
         .gte("created_at", since)
+        .limit(2000)
+        .execute()
+        .data
+        or []
     )
+    _fixed_issue_ids = [p["issue_id"] for p in fixed_pkg_rows if p.get("issue_id") is not None]
+    fixed_since = len(_fixed_issue_ids)  # safe fallback: 1 issue per package
+    if _fixed_issue_ids:
+        try:
+            dup_rows = (
+                sb.table("issues")
+                .select("raw_duplicate_count")
+                .in_("id", _fixed_issue_ids)
+                .execute()
+                .data
+                or []
+            )
+            if dup_rows:
+                fixed_since = sum(max(1, int(r.get("raw_duplicate_count") or 1)) for r in dup_rows)
+        except Exception:  # noqa: BLE001, S110
+            # Column missing (migration 0046 not applied) — keep the
+            # package-count fallback above so the endpoint still works.
+            pass
 
     # Ready delta — current packages in any ready/awaiting bucket created since baseline
     ready_since = _safe_count(
