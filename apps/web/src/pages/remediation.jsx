@@ -99,8 +99,23 @@ function recommendedPathway(pkg) {
 }
 
 export default function Remediation() {
-  const [packages, setPackages] = useState([])
-  const [loading, setLoading] = useState(true)
+  // Pipeline mode is what makes the data source differ (real vs demo).
+  // Keep caches keyed per-mode so switching modes never shows the other
+  // mode's packages even for the brief window before the new fetch lands.
+  const _initialMode = localStorage.getItem('pipelineMode') || 'real'
+  const _cacheKey = (mode) => `sisyfix:remediation:${mode}:v1`
+  const _loadCachedPkgs = (mode) => {
+    try {
+      const raw = localStorage.getItem(_cacheKey(mode))
+      if (!raw) return null
+      const c = JSON.parse(raw)
+      if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
+      return c.pkgs || null
+    } catch { return null }
+  }
+  const _cachedPkgs = _loadCachedPkgs(_initialMode)
+  const [packages, setPackages] = useState(_cachedPkgs || [])
+  const [loading, setLoading] = useState(!_cachedPkgs)
   const [error, setError] = useState(null)
   const [statusFilter, setStatusFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
@@ -134,6 +149,16 @@ export default function Remediation() {
     }
   }, [])
 
+  // When mode toggles, immediately swap the displayed packages to whatever
+  // is cached for the NEW mode (or empty + loading if nothing cached yet).
+  // Stops the old mode's data from flashing before the new fetch lands.
+  useEffect(() => {
+    const next = _loadCachedPkgs(pipelineMode)
+    setPackages(next || [])
+    setLoading(!next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pipelineMode])
+
   const isDemo = pipelineMode === 'demo'
   const apiBase = isDemo
     ? `${API_URL}/admin/remediation-packages/demo`
@@ -164,6 +189,9 @@ export default function Remediation() {
       const data = await res.json()
       const pkgs = data.packages || []
       setPackages(pkgs)
+      try {
+        localStorage.setItem(_cacheKey(pipelineMode), JSON.stringify({ ts: Date.now(), pkgs }))
+      } catch { /* best-effort */ }
     } catch (e) {
       setError(e.message || 'Failed to load packages')
       if (!silent) setPackages([])
@@ -384,10 +412,7 @@ export default function Remediation() {
           <div className="remediation-header rmp-header-flex">
             <div className="rmp-header-text">
               <h1>Remediation</h1>
-              <p className="remediation-subtitle">
-                Generated remediation packages — validated against authoritative sources, scored for confidence, gated by human approval.
-                {isDemo && ' — DEMO PIPELINE (5 pre-seeded issues)'}
-              </p>
+              <p className="remediation-subtitle">Review generated fix plans and track their execution</p>
             </div>
             <div style={{ display: 'flex', gap: 8, marginRight: 12 }}>
               <button
@@ -481,8 +506,16 @@ export default function Remediation() {
           {/* List */}
           <div className="rmp-list-card">
             <div className="rmp-list-scroll">
-            {loading ? (
-              <div className="rmp-empty">Loading packages…</div>
+            {loading && packages.length === 0 ? (
+              // Skeleton rows during a cold load so users don't see the
+              // "Loading…" flash; on revisits cache hydrates immediately.
+              <div className="rmp-empty" style={{ padding: 0 }}>
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={`rmp-skeleton-${i}`} style={{ padding: '14px 18px', borderBottom: '1px solid rgba(100,116,139,0.18)' }}>
+                    <span className="skeleton-block" style={{ display: 'inline-block', height: 14, width: '92%', background: 'linear-gradient(90deg, rgba(100,116,139,0.12) 0%, rgba(148,163,184,0.22) 50%, rgba(100,116,139,0.12) 100%)', backgroundSize: '200% 100%', borderRadius: 4, animation: 'rmp-skeleton-shimmer 1.4s ease-in-out infinite' }} />
+                  </div>
+                ))}
+              </div>
             ) : error ? (
               <div className="rmp-empty bad">Failed to load: {error}</div>
             ) : packages.length === 0 ? (
@@ -500,7 +533,7 @@ export default function Remediation() {
                     <th>ID</th>
                     <th>Finding</th>
                     <th>Scanner</th>
-                    <th>Family</th>
+                    <th>Type</th>
                     <th>Confidence</th>
                     <th>Validation</th>
                     <th>Approval</th>
@@ -521,7 +554,7 @@ export default function Remediation() {
                         <td>#{p.id}</td>
                         <td className="rmp-finding-cell">{p.finding || '—'}</td>
                         <td><span className="rmp-family-chip">{formatScannerName(p.source) || '—'}</span></td>
-                        <td><span className="rmp-family-chip">{FAMILY_LABEL[p.family] || p.family}</span></td>
+                        <td><span className="rmp-family-chip" title={`${FAMILY_LABEL[p.family] || p.family || '—'} · ${p.asset_name || '—'}`}>{p.asset_type || '—'}</span></td>
                         <td>
                           <ConfidenceCell pkg={p} apiBase={apiBase} />
                         </td>
@@ -554,14 +587,17 @@ export default function Remediation() {
                   Showing {displayTotal === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, displayTotal)} of {displayTotal} packages
                 </span>
                 <div className="issues-pagination">
-                  <button
-                    className={`pagination-btn ${handyFilter ? 'active' : ''}`}
-                    onClick={() => setHandyFilter(f => !f)}
-                    title="Show pre-run demo packages (handy for live walkthroughs)"
-                    style={{ fontWeight: 600, marginRight: 8 }}
-                  >
-                    #
-                  </button>
+                  {/* "#" pill is demo-only — hide on Real Pipeline. */}
+                  {isDemo && (
+                    <button
+                      className={`pagination-btn ${handyFilter ? 'active' : ''}`}
+                      onClick={() => setHandyFilter(f => !f)}
+                      title="Show pre-run demo packages (handy for live walkthroughs)"
+                      style={{ fontWeight: 600, marginRight: 8 }}
+                    >
+                      #
+                    </button>
+                  )}
 
                   {totalPages > 1 && (
                     <>
@@ -942,7 +978,9 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
                       color: '#f1f5f9',
                     }}
                   >
-                    Confidence
+                    <span title="SA-3 confidence score (0-100) across 5 factors: deterministic fix, blast radius, test coverage, rollback availability, environmental uncertainty">
+                      Confidence
+                    </span>
                     <span
                       className="rmp-conf-num"
                       style={{
@@ -1214,21 +1252,23 @@ function DetailDrawer({ pkg, loading, onClose, onApprove, onReject, onReviewAppr
             </div>
           )}
 
-          {/* Validation Metadata Footer */}
-          {vm && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '8px 0', borderTop: '1px solid #1E293B', marginTop: 8 }}>
-              <span className={`step-validated-tag ${vm.status === 'validated' ? 'validated' : 'not-validated'}`}>
-                Validation: {vm.status}
+          {/* Validation Metadata Footer — always rendered for layout
+              consistency across cards. Older packages may lack metadata, in
+              which case we show "—" instead of silently dropping the row. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', padding: '8px 0', borderTop: '1px solid #1E293B', marginTop: 8 }}>
+              <span className={`step-validated-tag ${vm?.status === 'validated' || vm?.status === 'proven' ? 'validated' : 'not-validated'}`}>
+                Validation: {vm?.status ? (vm.status === 'proven' ? 'validated' : vm.status) : 'partial'}
               </span>
-              <span style={{ fontSize: 10, color: '#64748B' }}>Confidence: {vm.confidence}</span>
-              <span style={{ fontSize: 10, color: '#64748B' }}>{formatDate(vm.timestamp)}</span>
-              {vm.sources?.length > 0 && (
+              <span style={{ fontSize: 10, color: '#64748B' }} title="How authoritative the sources cited for this plan are (low/medium/high)">
+                Source confidence: {vm?.confidence || '—'}
+              </span>
+              <span style={{ fontSize: 10, color: '#64748B' }}>{vm?.timestamp ? formatDate(vm.timestamp) : ''}</span>
+              {vm?.sources?.length > 0 && (
                 <div style={{ flex: '1 0 100%', fontSize: 10, color: '#94A3B8', marginTop: 4 }}>
                   📖 {vm.sources.join(' · ')}
                 </div>
               )}
             </div>
-          )}
 
         </div>
 

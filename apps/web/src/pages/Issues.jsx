@@ -44,7 +44,10 @@ export default function Issues() {
   const [searchTerm, setSearchTerm] = useState(issueIdParam)
   const [selectedSeverity, setSelectedSeverity] = useState([])
   const [currentPage, setCurrentPage] = useState(1)
-  const { issues } = useIssuesData()
+  const { issues, loading } = useIssuesData()
+  // Cold load = loading AND no cached rows yet. Return visits hydrate from
+  // localStorage and skip the skeleton entirely.
+  const isColdLoading = loading && issues.length === 0
   const [visibleColumns, setVisibleColumns] = useState(ISSUE_COLUMNS.map(c => c.key).filter(k => k !== 'cve_published' && k !== 'description'))
   const [selectedIssue, setSelectedIssue] = useState(null)
   // Items-per-page adapts to viewport height — zoom out or use a tall screen
@@ -194,11 +197,24 @@ export default function Issues() {
                 </thead>
                 <tbody>
                   {paginatedIssues.length === 0 ? (
-                    <tr>
-                      <td colSpan="100" className="issues-empty">
-                        No issues found matching your criteria
-                      </td>
-                    </tr>
+                    isColdLoading ? (
+                      // Skeleton rows while the first fetch is in flight, so
+                      // users don't briefly see "No issues found" during the
+                      // normal 1-3s load window.
+                      Array.from({ length: 8 }).map((_, i) => (
+                        <tr key={`skeleton-${i}`} className="issues-skeleton-row">
+                          <td colSpan="100">
+                            <span className="skeleton-block" style={{ height: 14, width: '95%' }} />
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="100" className="issues-empty">
+                          No issues found matching your criteria
+                        </td>
+                      </tr>
+                    )
                   ) : (
                     paginatedIssues.map((issue) => (
                       <tr key={issue.issue_id} onClick={() => setSelectedIssue(issue)} style={{ cursor: 'pointer' }}>

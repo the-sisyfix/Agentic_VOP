@@ -26,7 +26,8 @@ const validationColumns = [
 function getStatusClass(status) {
   if (status === 'Validated') return 'validated'
   if (status === 'Failed') return 'failed'
-  if (status === 'Action Needed') return 'action-needed'
+  // Partial reuses the existing "action-needed" pill styling (amber).
+  if (status === 'Partial' || status === 'Action Needed') return 'action-needed'
   if (status === 'Closed') return 'closed'
   return 'pending'
 }
@@ -59,8 +60,8 @@ function getStatusExplanation(status, item) {
   if (status === 'Failed') {
     return `Validation failed: ${item.evidence?.description || 'The remediation did not pass verification tests.'}`
   }
-  if (status === 'Action Needed') {
-    return `Action required: ${item.evidence?.description || 'Manual intervention needed.'}`
+  if (status === 'Partial' || status === 'Action Needed') {
+    return `Partial — ${item.evidence?.description || 'Some validation checks passed but at least one is incomplete.'}`
   }
   return null
 }
@@ -277,9 +278,20 @@ export default function Validation() {
   const [evidenceModalOpen, setEvidenceModalOpen] = useState(false)
   const [selectedEvidence, setSelectedEvidence] = useState(null)
   const [statusOverrides, setStatusOverrides] = useState({})
-  const [validationsData, setValidationsData] = useState([])
+  // Hydrate from localStorage so the Validation page paints instantly on
+  // revisits instead of flashing "No validations found" during the fetch.
+  const _cachedValidations = (() => {
+    try {
+      const raw = localStorage.getItem('sisyfix:validations:v1')
+      if (!raw) return null
+      const c = JSON.parse(raw)
+      if (!c?.ts || Date.now() - c.ts > 24 * 60 * 60 * 1000) return null
+      return c.rows || null
+    } catch { return null }
+  })()
+  const [validationsData, setValidationsData] = useState(_cachedValidations || [])
   const [remediationEvidenceData, setRemediationEvidenceData] = useState({})
-  const [, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!_cachedValidations)
 
   const itemsPerPage = 10
 
@@ -303,10 +315,16 @@ export default function Validation() {
           const pw = pkg.pathways?.[pwIdx] || pkg.pathways?.[0]
           const vm = pw?.validation_metadata
 
-          // Determine validation status from package data
+          // Determine validation status from package data.
+          // Mapping mirrors the Remediation page's VALIDATION_LABEL so both
+          // surfaces show the same word for the same underlying state.
+          //   validated | proven  -> "Validated"
+          //   partial  | unverified -> "Partial"
+          //   unvalidated        -> "Failed"
+          //   null (no metadata) -> "Pending"
           let status = 'Pending'
-          if (vm?.status === 'validated') status = 'Validated'
-          else if (vm?.status === 'partial') status = 'Action Needed'
+          if (vm?.status === 'validated' || vm?.status === 'proven') status = 'Validated'
+          else if (vm?.status === 'partial' || vm?.status === 'unverified') status = 'Partial'
           else if (vm?.status === 'unvalidated') status = 'Failed'
           else if (pkg.status === 'ready_for_execution') status = 'Validated'
           else if (pkg.status === 'rejected') status = 'Failed'
@@ -348,6 +366,9 @@ export default function Validation() {
         })
 
         setValidationsData(mapped)
+        try {
+          localStorage.setItem('sisyfix:validations:v1', JSON.stringify({ ts: Date.now(), rows: mapped }))
+        } catch { /* best-effort */ }
 
         // Build evidence map for the modal
         const evidenceMap = {}
@@ -409,7 +430,7 @@ export default function Validation() {
   const getValidationClass = (status) => {
     if (status === 'Validated') return 'validated'
     if (status === 'Failed') return 'failed'
-    if (status === 'Action Needed') return 'action-needed'
+    if (status === 'Partial' || status === 'Action Needed') return 'action-needed'
     if (status === 'Closed') return 'closed'
     return 'pending'
   }
@@ -609,9 +630,19 @@ export default function Validation() {
                 </thead>
                 <tbody>
                   {paginatedData.length === 0 ? (
-                    <tr>
-                      <td colSpan="100" className="validation-empty">No validations found</td>
-                    </tr>
+                    loading && validationsData.length === 0 ? (
+                      Array.from({ length: 8 }).map((_, i) => (
+                        <tr key={`skeleton-${i}`} className="validation-skeleton-row">
+                          <td colSpan="100">
+                            <span className="skeleton-block" style={{ height: 14, width: '95%' }} />
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="100" className="validation-empty">No validations found</td>
+                      </tr>
+                    )
                   ) : (
                     paginatedData.map(item => (
                       <tr key={`${viewMode}-${item.issue_id}`}>

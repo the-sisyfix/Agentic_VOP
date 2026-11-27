@@ -915,3 +915,24 @@
 .issue-drawer-points li:last-child {
   margin-bottom: 0;
 }
+
+/* Skeleton rows shown while the first issue fetch is in flight so users
+   don't briefly see "No issues found" during the 1-3s load. */
+.issues-skeleton-row td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle, #1E293B);
+}
+.skeleton-block {
+  display: inline-block;
+  background: linear-gradient(90deg,
+    rgba(100, 116, 139, 0.12) 0%,
+    rgba(148, 163, 184, 0.22) 50%,
+    rgba(100, 116, 139, 0.12) 100%);
+  background-size: 200% 100%;
+  border-radius: 4px;
+  animation: issues-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes issues-skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

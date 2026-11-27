@@ -19,9 +19,36 @@ const CRITICALITY_MAP = {
   1: 'Info',
 }
 
+// Stale-while-revalidate cache — same pattern as useDashboardData /
+// useIssuesData. Instant paint on revisits so the Assets page never
+// flashes "No assets found" during the 1-3s fetch.
+const CACHE_KEY = 'sisyfix:assets:v1'
+const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const cached = JSON.parse(raw)
+    if (!cached || !cached.ts || Date.now() - cached.ts > CACHE_MAX_AGE_MS) return null
+    return cached.assets || null
+  } catch {
+    return null
+  }
+}
+
+function saveCache(assets) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), assets }))
+  } catch {
+    // best-effort
+  }
+}
+
 export function useAssetsData() {
-  const [assets, setAssets] = useState([])
-  const [loading, setLoading] = useState(true)
+  const _cached = loadCache()
+  const [assets, setAssets] = useState(_cached || [])
+  const [loading, setLoading] = useState(!_cached)
 
   useEffect(() => {
     let mounted = true
@@ -75,6 +102,7 @@ export function useAssetsData() {
       }))
 
       setAssets(mapped)
+      saveCache(mapped)
       setLoading(false)
     }
 

@@ -19,7 +19,8 @@ const assetsColumns = [
 ]
 
 export default function Assets() {
-  const { assets } = useAssetsData()
+  const { assets, loading } = useAssetsData()
+  const isColdLoading = loading && assets.length === 0
   const [assetIssues, setAssetIssues] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
   const [selectedFilter, setSelectedFilter] = useState('All')
@@ -226,11 +227,21 @@ export default function Assets() {
                 </thead>
                 <tbody>
                   {paginatedAssets.length === 0 ? (
-                    <tr>
-                      <td colSpan="100" className="assets-empty">
-                        No assets found matching your criteria
-                      </td>
-                    </tr>
+                    isColdLoading ? (
+                      Array.from({ length: 8 }).map((_, i) => (
+                        <tr key={`skeleton-${i}`} className="assets-skeleton-row">
+                          <td colSpan="100">
+                            <span className="skeleton-block" style={{ height: 14, width: '95%' }} />
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan="100" className="assets-empty">
+                          No assets found matching your criteria
+                        </td>
+                      </tr>
+                    )
                   ) : (
                     paginatedAssets.map((asset) => (
                       <tr
